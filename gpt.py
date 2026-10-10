@@ -1,18 +1,27 @@
-import base64
-import requests
+"""Local Qwen3-VL replacement for the former OpenAI GPT-4o calls."""
 
-# OpenAI API Key
-API_KEY = ""
+import os
+from pathlib import Path
+from typing import Optional
 
 
-# Function to encode the image
-def encode_image(image_path):
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+QWEN3_VL_MODEL_PATH = os.environ.get(
+    "QWEN3_VL_MODEL_PATH", "/ssd/wyzhang/all_models/Qwen3-VL-8B-Instruct"
+)
+
+_MODEL = None
+_PROCESSOR = None
+_MODEL_DEVICE = None
+
+
+def _device_map_for(device):
+    if device is None or not str(device).strip():
+        return "auto"
+    return {"": str(device)}
 
 
 def prompt_make(prompt_path, ex_prompt):
-    with open(prompt_path, "r", encoding='utf-8') as f:
+    with open(prompt_path, "r", encoding="utf-8") as f:
         txt = f.readlines()
         prompt_system = txt[1]
         prompt = txt[3]
@@ -23,25 +32,92 @@ def prompt_make(prompt_path, ex_prompt):
         return prompt_system, prompt
 
 
-def gpt_4o_mini(prompt_path, ex_prompt, img_path=None):
-    api_key = API_KEY
+def _load_qwen3_vl(device=None):
+    global _MODEL, _PROCESSOR, _MODEL_DEVICE
+    requested_device = device if device is not None else os.environ.get("QWEN3_VL_DEVICE")
+    if _MODEL is not None and _PROCESSOR is not None:
+        if requested_device and _MODEL_DEVICE and str(requested_device) != str(_MODEL_DEVICE):
+            raise RuntimeError(f"Qwen3-VL already loaded on {_MODEL_DEVICE}; requested {requested_device}")
+        return _MODEL, _PROCESSOR
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
+    model_path = Path(QWEN3_VL_MODEL_PATH).expanduser()
+    if not model_path.is_dir():
+        raise FileNotFoundError(f"Qwen3-VL local model directory does not exist: {model_path}")
+    if not (model_path / "config.json").is_file():
+        raise FileNotFoundError(f"Qwen3-VL directory is missing config.json: {model_path}")
+
+    import torch
+    from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+
+    _MODEL = Qwen3VLForConditionalGeneration.from_pretrained(
+        str(model_path),
+        dtype="auto",
+        device_map=_device_map_for(requested_device),
+        local_files_only=True,
+    )
+    _MODEL.eval()
+    # PyTorch 2.2 used by Fine-EQA is incompatible with Transformers' fast
+    # Qwen image processor; the slow processor has the same model inputs.
+    _PROCESSOR = AutoProcessor.from_pretrained(
+        str(model_path),
+        local_files_only=True,
+        use_fast=False,
+    )
+    _MODEL_DEVICE = requested_device or "auto"
+    return _MODEL, _PROCESSOR
+
+
+def qwen3_vl(
+    prompt_path: str,
+    ex_prompt: str,
+    img_path: Optional[str] = None,
+    *,
+    device: Optional[str] = None,
+) -> str:
+    """Generate a response with the local Qwen3-VL checkpoint.
+
+    The function keeps the call signature used by ``main.py`` so region
+    selection, exploration stopping, answer generation, and EAC scoring all
+    use the same local model.
+    """
+
+    import torch
+
     prompt_system, prompt = prompt_make(prompt_path, ex_prompt)
-    content = [{"type": "text", "text": prompt}]
-    if img_path:
-        base64_image = encode_image(img_path)
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}})
-    payload = {
-        "model": "gpt-4o-mini",       
-        "messages": [
-            {"role": "system", "content": prompt_system},
-            {"role": "user", "content": content}
-        ]}
-    response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+    user_content = []
+    if img_path is not None:
+        image_path = Path(img_path).expanduser()
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Input image does not exist: {image_path}")
+        user_content.append({"type": "image", "image": str(image_path)})
+    user_content.append({"type": "text", "text": prompt})
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": prompt_system}]},
+        {"role": "user", "content": user_content},
+    ]
 
-    output = response.json()
-    return output["choices"][0]['message']["content"]
+    model, processor = _load_qwen3_vl(device=device)
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    inputs = inputs.to(model.device)
+
+    with torch.inference_mode():
+        generated_ids = model.generate(
+            **inputs,
+            do_sample=False,
+            max_new_tokens=512,
+        )
+
+    generated_ids_trimmed = [
+        out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    return processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0].strip()

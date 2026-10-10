@@ -390,13 +390,20 @@ class TSDFPlanner:
         regions_dict,
         exp_radius=0.5,
         smooth_sigma=5,
+        region_index=None,
     ):
         """Determine the next exploration point within the relevant region based on the masked semantic map."""
         # Masked semantic map
         val_vol_2d = np.max(self._val_vol_cpu, axis=2).copy()
         val_vol_2d = gaussian_filter(val_vol_2d, sigma=smooth_sigma)
         reg = [i["count"] for i in self.exp_list]
-        idx = np.argmax(reg)
+        if (
+            isinstance(region_index, (int, np.integer))
+            and 0 <= int(region_index) < len(self.exp_list)
+        ):
+            idx = int(region_index)
+        else:
+            idx = int(np.argmax(reg))
         region_value = self.exp_list[idx]["region"]
         mask = self._val_region_cpu == region_value
         masked_val_vol_2d = np.where(mask, val_vol_2d, 0)

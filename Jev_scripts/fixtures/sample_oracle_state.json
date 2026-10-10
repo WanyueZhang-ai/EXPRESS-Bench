@@ -1,0 +1,44 @@
+[
+  {
+    "episode_id": "fixture-oracle-0",
+    "step": 2,
+    "seed": 42,
+    "question": "Did I leave the faucet running in the kitchen?",
+    "question_type": "state",
+    "history": {
+      "step": 2,
+      "max_steps": 30,
+      "path_length": 1.5,
+      "recent_actions": ["fbe", "fbe"]
+    },
+    "perception": {
+      "stop_vlm_label": "no",
+      "stop_vlm_score": 0.18,
+      "visible_region": "dining room",
+      "visible_region_confidence": 0.61
+    },
+    "oracle_semantic": {
+      "semantic_source": "habitat_current_fov",
+      "current_fov_labels": ["kitchen", "faucet"]
+    },
+    "goe_candidates": [
+      {
+        "id": "goe_0",
+        "region": "kitchen",
+        "count": 2,
+        "direction": 0,
+        "point_count": 3
+      }
+    ],
+    "fbe_candidates": [
+      {
+        "id": "fbe_0",
+        "distance": 2.8,
+        "frontier_value": 0.64,
+        "unexplored_fraction": 0.51
+      }
+    ],
+    "baseline_action": "fbe",
+    "baseline_target_id": "fbe_0"
+  }
+]

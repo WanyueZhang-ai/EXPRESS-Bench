@@ -34,6 +34,8 @@ def make_simple_cfg(settings):
     # simulator backend
     sim_cfg = habitat_sim.SimulatorConfiguration()
     sim_cfg.scene_id = settings["scene"]
+    if settings.get("scene_dataset"):
+        sim_cfg.scene_dataset_config_file = settings["scene_dataset"]
 
     # agent
     agent_cfg = habitat_sim.agent.AgentConfiguration()
@@ -53,7 +55,17 @@ def make_simple_cfg(settings):
     depth_sensor_spec.position = [0.0, settings["sensor_height"], 0.0]
     depth_sensor_spec.hfov = settings["hfov"]
 
-    agent_cfg.sensor_specifications = [rgb_sensor_spec, depth_sensor_spec]
+    sensor_specs = [rgb_sensor_spec, depth_sensor_spec]
+    if settings.get("semantic_sensor", False):
+        semantic_sensor_spec = habitat_sim.CameraSensorSpec()
+        semantic_sensor_spec.uuid = "semantic_sensor"
+        semantic_sensor_spec.sensor_type = habitat_sim.SensorType.SEMANTIC
+        semantic_sensor_spec.resolution = [settings["height"], settings["width"]]
+        semantic_sensor_spec.position = [0.0, settings["sensor_height"], 0.0]
+        semantic_sensor_spec.hfov = settings["hfov"]
+        sensor_specs.append(semantic_sensor_spec)
+
+    agent_cfg.sensor_specifications = sensor_specs
 
     return habitat_sim.Configuration(sim_cfg, [agent_cfg])
 
