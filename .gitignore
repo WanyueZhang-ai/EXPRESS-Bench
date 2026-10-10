@@ -1,0 +1,36 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Local agent/editor metadata
+.superpowers/
+.DS_Store
+
+# Logs, reports, and generated experiment outputs
+logs/
+debug_one/
+debug_one.log
+experiment_result/
+experiment_result_*/
+express_results_report.html
+report_validation.json
+intern_decision_metrics_snapshot.json
+
+# Local model checkouts
+prismatic-vlms/
+
+# Datasets and downloaded archives
+data/episode/
+data/episode.zip
+data/hm3d/
+data/*.tar
+data/.msc
+data/.mv
+
+# Accidental local output
+=10.0.0
