@@ -27,5 +27,30 @@ prismatic-vlms/
 # Downloaded datasets; previously tracked files remain tracked
 data/**
 
+# Large datasets, model weights, checkpoints, and videos
+/datasets/
+/checkpoints/
+/weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.mp4
+*.mov
+*.avi
+*.mkv
+
 # Accidental local output
 =10.0.0
