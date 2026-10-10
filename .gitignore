@@ -24,13 +24,8 @@ intern_decision_metrics_snapshot.json
 # Local model checkouts
 prismatic-vlms/
 
-# Datasets and downloaded archives
-data/episode/
-data/episode.zip
-data/hm3d/
-data/*.tar
-data/.msc
-data/.mv
+# Downloaded datasets; previously tracked files remain tracked
+data/**
 
 # Accidental local output
 =10.0.0
