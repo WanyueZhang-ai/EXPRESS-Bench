@@ -29,6 +29,7 @@ try:
         WorkerSpec,
         build_worker_command,
         merge_jev_traces,
+        merge_efficiency_traces,
         merge_results,
         prepare_workers,
         read_progress,
@@ -41,6 +42,7 @@ except ImportError:  # Support ``python Jev_scripts/run_parallel.py``.
         WorkerSpec,
         build_worker_command,
         merge_jev_traces,
+        merge_efficiency_traces,
         merge_results,
         prepare_workers,
         read_progress,
@@ -151,6 +153,7 @@ def run_parallel(
     dry_run: bool = False,
     progress_interval: float = 5.0,
     resume: bool = False,
+    efficiency_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Prepare and run one process per selected GPU, then merge outputs."""
 
@@ -176,6 +179,8 @@ def run_parallel(
         raise ValueError("progress_interval must be positive")
     if total_questions <= 0:
         raise ValueError("total_questions must be positive")
+    if efficiency_mode not in {None, "light", "detailed"}:
+        raise ValueError("efficiency_mode must be light or detailed")
 
     gpu_ids = resolve_gpu_ids(num_gpus, gpus)
     if len(gpu_ids) > total_questions:
@@ -198,6 +203,7 @@ def run_parallel(
             output_dir=worker.output_dir,
             progress_file=worker.progress_file,
             append_trace=resume,
+            efficiency_mode=efficiency_mode,
         )
         for worker in active_workers
     ]
@@ -319,6 +325,8 @@ def run_parallel(
                 log_handle.close()
         raise
     print(_progress_line(workers, processes), flush=True)
+    # Failed worker attempts are useful diagnostics too. Merge before raising.
+    merge_efficiency_traces([worker.output_dir for worker in workers], output_dir)
     if failures:
         raise RuntimeError(
             "one or more GPU workers failed; shard outputs were kept: "
@@ -411,6 +419,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5.0,
         help="seconds between aggregate progress lines (default: 5)",
     )
+    parser.add_argument("--efficiency", action="store_true", help="enable worker efficiency profiling")
+    parser.add_argument("--efficiency-mode", choices=["light", "detailed"], default=None)
     return parser
 
 
@@ -429,6 +439,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dry_run=args.dry_run,
             progress_interval=args.progress_interval,
             resume=args.resume,
+            efficiency_mode=args.efficiency_mode or ("light" if args.efficiency else None),
         )
     except Exception as exc:
         print(f"parallel run failed: {exc}", file=sys.stderr)

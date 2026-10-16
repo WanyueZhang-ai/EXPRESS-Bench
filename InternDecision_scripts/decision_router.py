@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import time
+from src.efficiency import profiled_operation
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -188,6 +189,7 @@ class InternDecisionRouter:
             response=copy.deepcopy(dict(response)) if isinstance(response, Mapping) else None,
         )
 
+    @profiled_operation("decision.route", "decision_overhead")
     def decide(
         self,
         state: Mapping[str, Any],

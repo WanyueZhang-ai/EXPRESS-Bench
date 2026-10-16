@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional
+from src.efficiency import current_profiler
+from src.efficiency_models import model_call
 
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai/v1/systemone"
@@ -156,20 +158,25 @@ class JevClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        started = time.perf_counter()
-        last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                raw = self._transport(self.base_url, headers, payload, self.timeout)
-                elapsed_ms = (time.perf_counter() - started) * 1000.0
-                return self.parse_response(raw, latency_ms=elapsed_ms)
-            except (JevTransportError, JevHTTPError, JevSchemaError) as exc:
-                last_error = exc
-                if attempt >= self.max_retries or not self._retryable(exc):
-                    raise
-                self._sleep(self.backoff_seconds * (2 ** attempt))
-        # The loop always returns or raises; keep a defensive error for static analyzers.
-        raise last_error or JevError("Jev request failed")
+        efficiency = current_profiler()
+        with model_call("jev", "decision", input_modality="text", output_kind="decision",
+                        backend_model=self.model, decision_fields=len(questions)) as call:
+            started = time.perf_counter()
+            last_error: Optional[Exception] = None
+            for attempt in range(self.max_retries + 1):
+                call.update(attempts=attempt + 1, retry_count=attempt)
+                try:
+                    raw = efficiency.measure("api.transport", self._transport, self.base_url, headers, payload, self.timeout)
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+                    response = self.parse_response(raw, latency_ms=elapsed_ms)
+                    call.set_response(raw, external=True)
+                    return response
+                except (JevTransportError, JevHTTPError, JevSchemaError) as exc:
+                    last_error = exc
+                    if attempt >= self.max_retries or not self._retryable(exc):
+                        raise
+                    efficiency.measure("api.retry_wait", self._sleep, self.backoff_seconds * (2 ** attempt))
+            raise last_error or JevError("Jev request failed")
 
     @classmethod
     def parse_response(

@@ -98,3 +98,10 @@ intern_decision:
   max_steps: 0
   deterministic: true
   seed: 42
+
+# Optional efficiency analysis. Detailed mode synchronizes CUDA phase boundaries.
+efficiency:
+  enabled: false
+  mode: light  # light or detailed
+  warmup_calls: 1  # label first N calls per worker/model/purpose/modality
+  report: true

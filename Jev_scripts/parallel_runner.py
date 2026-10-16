@@ -131,6 +131,7 @@ def build_worker_command(
     output_dir: Path,
     progress_file: Optional[Path] = None,
     append_trace: bool = False,
+    efficiency_mode: Optional[str] = None,
 ) -> List[str]:
     """Build the subprocess command for one shard."""
 
@@ -148,6 +149,8 @@ def build_worker_command(
         command.extend(["--progress-file", str(progress_file)])
     if append_trace:
         command.append("--append-trace")
+    if efficiency_mode is not None:
+        command.extend(["--efficiency-mode", efficiency_mode])
     return command
 
 
@@ -231,6 +234,12 @@ def prepare_workers(
             if path.is_dir():
                 shutil.rmtree(path)
             else:
+                path.unlink()
+    if overwrite:
+        from src.efficiency import TRACE_FILES, REPORT_FILES
+        for filename in tuple(TRACE_FILES.values()) + REPORT_FILES:
+            path = output_dir / filename
+            if path.is_file():
                 path.unlink()
     output_dir.mkdir(parents=True, exist_ok=True)
     shard_root.mkdir(parents=True, exist_ok=True)
@@ -448,3 +457,12 @@ def merge_jev_traces(shard_dirs: Sequence[Path], output_dir: Path) -> int:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         total_records += len(records)
     return total_records
+
+
+def merge_efficiency_traces(shard_dirs: Sequence[Path], output_dir: Path):
+    """Keep original attempts and regenerate a canonical resume-aware report."""
+    from src.efficiency import TRACE_FILES
+    if not any((Path(directory) / filename).exists() for directory in shard_dirs for filename in TRACE_FILES.values()):
+        return None
+    from src.efficiency_report import build_report
+    return build_report(shard_dirs, output_dir, merge_traces=True)

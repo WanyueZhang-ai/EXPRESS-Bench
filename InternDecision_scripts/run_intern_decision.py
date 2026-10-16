@@ -29,6 +29,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--progress-file", default=None)
     parser.add_argument("--append-trace", action="store_true")
+    parser.add_argument("--efficiency", action="store_true")
+    parser.add_argument("--efficiency-mode", choices=["light", "detailed"], default=None)
     parser.add_argument(
         "--clean-output",
         action="store_true",
@@ -63,6 +65,8 @@ def main() -> int:
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.load(args.cfg_file)
+    from src.efficiency import apply_efficiency_cli
+    apply_efficiency_cli(cfg, enabled=args.efficiency, mode=args.efficiency_mode)
     if "intern_decision" not in cfg or cfg.intern_decision is None:
         cfg.intern_decision = OmegaConf.create({})
     cfg.intern_decision.enabled = True
