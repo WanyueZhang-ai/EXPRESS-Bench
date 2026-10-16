@@ -56,6 +56,10 @@ in [docs/efficiency.md](docs/efficiency.md). Use `--efficiency-mode detailed`
 to observe supported visual encoding boundaries, or `--efficiency` for
 lightweight end-to-end measurements. Profiling is disabled by default.
 
+Start with `--sample-size 10 --sample-seed 42` to validate only ten randomly
+selected questions. The full Chinese server workflow, including monitoring and
+resume, is in [docs/server-efficiency-quickstart.zh-CN.md](docs/server-efficiency-quickstart.zh-CN.md).
+
 To run the Fine-EQA model, you can use the following command:
 
 ```

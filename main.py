@@ -920,6 +920,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
 if __name__ == "__main__":
     import argparse
     from omegaconf import OmegaConf
+    from src.question_selection import add_selection_arguments, resolve_cli_selection, save_selection
 
     # Get config path
     parser = argparse.ArgumentParser()
@@ -927,11 +928,7 @@ if __name__ == "__main__":
         "-cf", "--cfg_file", "--cfg-file",
         help="cfg file path", default="", type=str
     )
-    parser.add_argument(
-        "--indices-file",
-        help="JSON list of original question indices to process",
-        default=None, type=str,
-    )
+    add_selection_arguments(parser)
     parser.add_argument(
         "--output-dir",
         help="override cfg.output_dir (used by parallel workers)",
@@ -956,12 +953,8 @@ if __name__ == "__main__":
     if args.output_dir is not None:
         cfg.output_dir = args.output_dir
 
-    question_indices = None
-    if args.indices_file is not None:
-        with open(args.indices_file, "r", encoding="utf-8") as handle:
-            question_indices = json.load(handle)
-        if not isinstance(question_indices, list):
-            raise ValueError("--indices-file must contain a JSON list")
+    question_indices, selection = resolve_cli_selection(cfg, args)
+    save_selection(cfg.output_dir, selection)
 
     # Set up logging
     output_dir = cfg.output_dir

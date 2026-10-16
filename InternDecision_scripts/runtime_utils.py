@@ -5,6 +5,7 @@ import re
 import shutil
 from pathlib import Path
 from src.efficiency import TRACE_FILES, REPORT_FILES
+from src.question_selection import SELECTION_FILES
 
 
 _SCENE_DATASET_CONFIG = "hm3d_annotated_basis.scene_dataset_config.json"
@@ -17,6 +18,7 @@ _CLEAN_ROOT_FILES = {
 }
 _CLEAN_ROOT_FILES.update(TRACE_FILES.values())
 _CLEAN_ROOT_FILES.update(REPORT_FILES)
+_CLEAN_ROOT_FILES.update(SELECTION_FILES)
 
 
 def scene_dataset_config_path(scene_path: str | Path) -> Path:

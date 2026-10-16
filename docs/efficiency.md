@@ -7,8 +7,16 @@ It never runs an extra inference or changes the decision prompt/options.
 
 ## Run
 
-Use the normal dataset, model and Habitat environment. For a first check, supply
-an existing one-question `--indices-file`; omit it for a full run.
+For the complete Chinese server workflow (download/patch, 10-question validation,
+monitoring, resume and report download), see
+[server-efficiency-quickstart.zh-CN.md](server-efficiency-quickstart.zh-CN.md).
+
+Use the normal dataset, model and Habitat environment. For a first check, use
+`--sample-size 10 --sample-seed 42` or an existing `--indices-file`. All launchers
+support these mutually exclusive selection methods. Exact original IDs are saved
+in `selected_indices.json`, with provenance in `question_selection.json`.
+Parallel sharding/resume retains these IDs and rejects changed subsets.
+Omitting both selection options runs the full dataset.
 
 ```bash
 # Detailed image encoding boundaries, generation timing and token accounting

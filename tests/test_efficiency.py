@@ -236,12 +236,12 @@ def test_cuda_events_and_process_memory_have_explicit_separate_scopes(tmp_path, 
     assert sum(step["category_wall_ms"].values()) == pytest.approx(20)  # GPU ms are never added
 
 
-@pytest.mark.parametrize("fail_then_resume", [False, True])
-def test_parallel_subprocesses_merge_profiles_and_recover_failed_worker(tmp_path, fail_then_resume):
+@pytest.mark.parametrize("fail_then_resume,sample_size", [(False, None), (True, None), (True, 10)])
+def test_parallel_subprocesses_merge_profiles_and_recover_failed_worker(tmp_path, fail_then_resume, sample_size):
     from Jev_scripts.run_parallel import run_parallel
     worker = tmp_path / "worker.py"
     worker.write_text("""
-import argparse, json, pickle, sys
+import argparse, json, os, pickle, sys
 from pathlib import Path
 sys.path.insert(0, REPOSITORY_ROOT)
 from src.efficiency import current_profiler, profiled_run
@@ -267,7 +267,7 @@ def run(cfg, append_trace=False):
             pass
         with model_call('worker_model', 'decision', input_modality='text', output_kind='decision') as call:
             call.set_inputs({'input_ids': [[1, 2, 3]]})
-            if fail and index == 1:
+            if fail and os.environ['CUDA_VISIBLE_DEVICES'] == '1' and index == indices[0]:
                 raise RuntimeError('intentional worker failure')
         profiler.end_step()
         profiler.end_episode()
@@ -280,22 +280,26 @@ run(cfg, append_trace=args.append_trace)
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(json.dumps({"fail": fail_then_resume}))
     output = tmp_path / "parallel"
-    options = dict(cfg_file=cfg_file, output_dir=output, total_questions=2, gpus="0,1", num_gpus=2,
-                   main_script=worker, python_executable=sys.executable, progress_interval=.05, efficiency_mode="detailed")
+    selected_count = sample_size or 2
+    options = dict(cfg_file=cfg_file, output_dir=output, total_questions=25 if sample_size else 2, gpus="0,1", num_gpus=2,
+                   main_script=worker, python_executable=sys.executable, progress_interval=.05, efficiency_mode="detailed",
+                   sample_size=sample_size)
     if fail_then_resume:
         with pytest.raises(RuntimeError, match="one or more GPU workers failed"):
             run_parallel(**options)
         partial = json.loads((output / "efficiency_summary.json").read_text())
-        assert partial["episodes"]["status_counts"] == {"ok": 1, "error": 1}
+        assert partial["episodes"]["status_counts"] == {"ok": selected_count // 2, "error": 1}
         assert (output / "efficiency_report.html").exists()
         cfg_file.write_text(json.dumps({"fail": False}))
     result = run_parallel(**options, resume=fail_then_resume)
-    assert result["result_count"] == 2
+    assert result["result_count"] == selected_count
     summary = json.loads((output / "efficiency_summary.json").read_text())
-    assert summary["episodes"]["count"] == 2
-    assert summary["calls"]["count"] == 2
-    assert summary["calls"]["tokens"]["effective_input_tokens"]["total"] == 6
-    assert summary["steps"]["simulator_transition_count"] == 2
+    assert summary["episodes"]["count"] == selected_count
+    assert summary["calls"]["count"] == selected_count
+    assert summary["calls"]["tokens"]["effective_input_tokens"]["total"] == selected_count * 3
+    assert summary["steps"]["simulator_transition_count"] == selected_count
     assert {row["mode"] for row in summary["model_groups"]} == {"detailed"}
     assert len(summary["runs"]) == (3 if fail_then_resume else 2)
-    assert summary["diagnostics"]["raw_calls"] == (3 if fail_then_resume else 2)
+    assert summary["diagnostics"]["raw_calls"] == selected_count + int(fail_then_resume)
+    selected = json.loads((output / "selected_indices.json").read_text())
+    assert sorted(row["episode_id"] for row in summary["episode_records"]) == selected

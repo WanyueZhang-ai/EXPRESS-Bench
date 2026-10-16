@@ -27,6 +27,12 @@ python -m InternDecision_scripts.run_intern_decision_smoke
 
 ## Three planner experiments
 
+For a reproducible ten-question check, add `--sample-size 10 --sample-seed 42`.
+This works with both the Intern launcher and the parallel launcher. Exact IDs
+are saved in `selected_indices.json` and can be reused through `--indices-file`.
+See the [Chinese server workflow](../docs/server-efficiency-quickstart.zh-CN.md)
+for download, monitoring, resume and report instructions.
+
 Each command keeps the existing Habitat episode loop and result format. The
 dataset currently contains 2044 questions. The commands below process the
 complete dataset; do not add `--indices-file` unless you intentionally want a

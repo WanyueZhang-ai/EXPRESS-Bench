@@ -51,6 +51,9 @@ except ImportError:  # Support ``python Jev_scripts/run_parallel.py``.
     )
 
 
+from src.question_selection import add_selection_arguments, select_indices, selection_metadata, save_selection
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -117,7 +120,12 @@ def _progress_line(
         process = process_by_worker.get(worker.worker_id)
         state = read_progress(worker.progress_file)
         completed = int(state.get("completed_questions", 0) or 0)
-        total = int(state.get("total_questions", len(worker.indices)) or 0)
+        total = len(worker.indices)
+        # A resumed main.py reports its pending list; the launcher displays
+        # progress against the original subset, including durable old results.
+        if state.get("total_questions") == len(worker.pending_indices):
+            completed += total - len(worker.pending_indices)
+        completed = min(total, completed)
         completed_total += completed
         question_total += total
         status = str(state.get("status", "starting"))
@@ -154,6 +162,9 @@ def run_parallel(
     progress_interval: float = 5.0,
     resume: bool = False,
     efficiency_mode: Optional[str] = None,
+    sample_size: Optional[int] = None,
+    sample_seed: int = 42,
+    indices_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Prepare and run one process per selected GPU, then merge outputs."""
 
@@ -182,16 +193,26 @@ def run_parallel(
     if efficiency_mode not in {None, "light", "detailed"}:
         raise ValueError("efficiency_mode must be light or detailed")
 
+    question_indices = select_indices(total_questions, sample_size=sample_size,
+                                      sample_seed=sample_seed, indices_file=indices_file)
+    selected_count = len(question_indices)
+
     gpu_ids = resolve_gpu_ids(num_gpus, gpus)
-    if len(gpu_ids) > total_questions:
-        gpu_ids = gpu_ids[:total_questions]
+    if len(gpu_ids) > selected_count:
+        gpu_ids = gpu_ids[:selected_count]
     workers = prepare_workers(
         total_questions=total_questions,
         gpu_ids=gpu_ids,
         output_dir=output_dir,
         overwrite=overwrite,
         resume=resume,
+        question_indices=question_indices,
     )
+    selection = selection_metadata(question_indices, total_questions, sample_size=sample_size,
+                                   sample_seed=sample_seed, indices_file=indices_file)
+    save_selection(output_dir, selection)
+    print(f"[parallel] selected {selected_count}/{total_questions} questions "
+          f"({selection['method']}); indices={output_dir / 'selected_indices.json'}", flush=True)
 
     active_workers = [worker for worker in workers if worker.pending_indices]
     commands = [
@@ -230,7 +251,9 @@ def run_parallel(
     if dry_run:
         return {
             "output_dir": str(output_dir),
-            "total_questions": total_questions,
+            "total_questions": selected_count,
+            "dataset_question_count": total_questions,
+            "question_indices": question_indices,
             "gpu_ids": gpu_ids,
             "commands": commands,
             "workers": workers,
@@ -337,7 +360,7 @@ def run_parallel(
     merged = merge_results(
         shard_dirs,
         output_dir,
-        expected_indices=range(total_questions),
+        expected_indices=question_indices,
     )
     trace_count = merge_jev_traces(shard_dirs, output_dir)
     try:
@@ -351,7 +374,7 @@ def run_parallel(
     _write_parallel_summary(
         output_dir,
         cfg_file=cfg_file,
-        total_questions=total_questions,
+        total_questions=selected_count,
         workers=workers,
         trace_count=trace_count,
         result_count=len(merged),
@@ -359,7 +382,8 @@ def run_parallel(
     )
     return {
         "output_dir": str(output_dir),
-        "total_questions": total_questions,
+        "total_questions": selected_count,
+        "dataset_question_count": total_questions,
         "gpu_ids": gpu_ids,
         "result_count": len(merged),
         "trace_count": trace_count,
@@ -421,6 +445,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--efficiency", action="store_true", help="enable worker efficiency profiling")
     parser.add_argument("--efficiency-mode", choices=["light", "detailed"], default=None)
+    add_selection_arguments(parser)
     return parser
 
 
@@ -439,6 +464,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dry_run=args.dry_run,
             progress_interval=args.progress_interval,
             resume=args.resume,
+            sample_size=args.sample_size,
+            sample_seed=args.sample_seed,
+            indices_file=Path(args.indices_file) if args.indices_file is not None else None,
             efficiency_mode=args.efficiency_mode or ("light" if args.efficiency else None),
         )
     except Exception as exc:
