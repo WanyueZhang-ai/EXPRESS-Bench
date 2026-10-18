@@ -29,6 +29,7 @@ try:
         WorkerSpec,
         build_worker_command,
         merge_jev_traces,
+        merge_efficiency_traces,
         merge_results,
         prepare_workers,
         read_progress,
@@ -41,12 +42,16 @@ except ImportError:  # Support ``python Jev_scripts/run_parallel.py``.
         WorkerSpec,
         build_worker_command,
         merge_jev_traces,
+        merge_efficiency_traces,
         merge_results,
         prepare_workers,
         read_progress,
         resolve_gpu_ids,
         write_progress,
     )
+
+
+from src.question_selection import add_selection_arguments, select_indices, selection_metadata, save_selection
 
 
 def _repo_root() -> Path:
@@ -115,7 +120,12 @@ def _progress_line(
         process = process_by_worker.get(worker.worker_id)
         state = read_progress(worker.progress_file)
         completed = int(state.get("completed_questions", 0) or 0)
-        total = int(state.get("total_questions", len(worker.indices)) or 0)
+        total = len(worker.indices)
+        # A resumed main.py reports its pending list; the launcher displays
+        # progress against the original subset, including durable old results.
+        if state.get("total_questions") == len(worker.pending_indices):
+            completed += total - len(worker.pending_indices)
+        completed = min(total, completed)
         completed_total += completed
         question_total += total
         status = str(state.get("status", "starting"))
@@ -151,6 +161,10 @@ def run_parallel(
     dry_run: bool = False,
     progress_interval: float = 5.0,
     resume: bool = False,
+    efficiency_mode: Optional[str] = None,
+    sample_size: Optional[int] = None,
+    sample_seed: int = 42,
+    indices_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Prepare and run one process per selected GPU, then merge outputs."""
 
@@ -176,17 +190,29 @@ def run_parallel(
         raise ValueError("progress_interval must be positive")
     if total_questions <= 0:
         raise ValueError("total_questions must be positive")
+    if efficiency_mode not in {None, "light", "detailed"}:
+        raise ValueError("efficiency_mode must be light or detailed")
+
+    question_indices = select_indices(total_questions, sample_size=sample_size,
+                                      sample_seed=sample_seed, indices_file=indices_file)
+    selected_count = len(question_indices)
 
     gpu_ids = resolve_gpu_ids(num_gpus, gpus)
-    if len(gpu_ids) > total_questions:
-        gpu_ids = gpu_ids[:total_questions]
+    if len(gpu_ids) > selected_count:
+        gpu_ids = gpu_ids[:selected_count]
     workers = prepare_workers(
         total_questions=total_questions,
         gpu_ids=gpu_ids,
         output_dir=output_dir,
         overwrite=overwrite,
         resume=resume,
+        question_indices=question_indices,
     )
+    selection = selection_metadata(question_indices, total_questions, sample_size=sample_size,
+                                   sample_seed=sample_seed, indices_file=indices_file)
+    save_selection(output_dir, selection)
+    print(f"[parallel] selected {selected_count}/{total_questions} questions "
+          f"({selection['method']}); indices={output_dir / 'selected_indices.json'}", flush=True)
 
     active_workers = [worker for worker in workers if worker.pending_indices]
     commands = [
@@ -198,6 +224,7 @@ def run_parallel(
             output_dir=worker.output_dir,
             progress_file=worker.progress_file,
             append_trace=resume,
+            efficiency_mode=efficiency_mode,
         )
         for worker in active_workers
     ]
@@ -224,7 +251,9 @@ def run_parallel(
     if dry_run:
         return {
             "output_dir": str(output_dir),
-            "total_questions": total_questions,
+            "total_questions": selected_count,
+            "dataset_question_count": total_questions,
+            "question_indices": question_indices,
             "gpu_ids": gpu_ids,
             "commands": commands,
             "workers": workers,
@@ -319,6 +348,8 @@ def run_parallel(
                 log_handle.close()
         raise
     print(_progress_line(workers, processes), flush=True)
+    # Failed worker attempts are useful diagnostics too. Merge before raising.
+    merge_efficiency_traces([worker.output_dir for worker in workers], output_dir)
     if failures:
         raise RuntimeError(
             "one or more GPU workers failed; shard outputs were kept: "
@@ -329,7 +360,7 @@ def run_parallel(
     merged = merge_results(
         shard_dirs,
         output_dir,
-        expected_indices=range(total_questions),
+        expected_indices=question_indices,
     )
     trace_count = merge_jev_traces(shard_dirs, output_dir)
     try:
@@ -343,7 +374,7 @@ def run_parallel(
     _write_parallel_summary(
         output_dir,
         cfg_file=cfg_file,
-        total_questions=total_questions,
+        total_questions=selected_count,
         workers=workers,
         trace_count=trace_count,
         result_count=len(merged),
@@ -351,7 +382,8 @@ def run_parallel(
     )
     return {
         "output_dir": str(output_dir),
-        "total_questions": total_questions,
+        "total_questions": selected_count,
+        "dataset_question_count": total_questions,
         "gpu_ids": gpu_ids,
         "result_count": len(merged),
         "trace_count": trace_count,
@@ -411,6 +443,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5.0,
         help="seconds between aggregate progress lines (default: 5)",
     )
+    parser.add_argument("--efficiency", action="store_true", help="enable worker efficiency profiling")
+    parser.add_argument("--efficiency-mode", choices=["light", "detailed"], default=None)
+    add_selection_arguments(parser)
     return parser
 
 
@@ -429,6 +464,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dry_run=args.dry_run,
             progress_interval=args.progress_interval,
             resume=args.resume,
+            sample_size=args.sample_size,
+            sample_seed=args.sample_seed,
+            indices_file=Path(args.indices_file) if args.indices_file is not None else None,
+            efficiency_mode=args.efficiency_mode or ("light" if args.efficiency else None),
         )
     except Exception as exc:
         print(f"parallel run failed: {exc}", file=sys.stderr)

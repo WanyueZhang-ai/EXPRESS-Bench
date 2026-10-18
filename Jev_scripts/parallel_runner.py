@@ -131,6 +131,7 @@ def build_worker_command(
     output_dir: Path,
     progress_file: Optional[Path] = None,
     append_trace: bool = False,
+    efficiency_mode: Optional[str] = None,
 ) -> List[str]:
     """Build the subprocess command for one shard."""
 
@@ -148,6 +149,8 @@ def build_worker_command(
         command.extend(["--progress-file", str(progress_file)])
     if append_trace:
         command.append("--append-trace")
+    if efficiency_mode is not None:
+        command.extend(["--efficiency-mode", efficiency_mode])
     return command
 
 
@@ -193,11 +196,15 @@ def prepare_workers(
     output_dir: Path,
     overwrite: bool = False,
     resume: bool = False,
+    question_indices: Optional[Sequence[int]] = None,
 ) -> List[WorkerSpec]:
     """Create shard directories and index manifests before launching workers."""
 
     if overwrite and resume:
         raise ValueError("--overwrite and --resume cannot be used together")
+    from src.question_selection import validate_indices
+    selected_indices = (list(range(total_questions)) if question_indices is None
+                        else validate_indices(question_indices, total_questions))
     output_dir = Path(output_dir)
     shard_root = output_dir / "shards"
     generated_paths = [output_dir / "manifest.json", output_dir / "results.pkl"]
@@ -211,12 +218,14 @@ def prepare_workers(
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest_gpu_ids = [int(item["gpu_id"]) for item in manifest["workers"]]
             manifest_total = int(manifest["total_questions"])
+            manifest_indices = manifest.get("question_indices", list(range(manifest_total)))
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("invalid parallel manifest; cannot resume safely") from exc
-        if manifest_total != int(total_questions) or manifest_gpu_ids != [int(gpu) for gpu in gpu_ids]:
+        if (manifest_total != int(total_questions) or manifest_gpu_ids != [int(gpu) for gpu in gpu_ids]
+                or manifest_indices != selected_indices):
             raise ValueError(
                 "resume configuration differs from the existing manifest; use the same "
-                "question count and GPU list"
+                "dataset size, selected question indices and GPU list"
             )
     elif output_dir.exists() and not overwrite:
         existing_workers = list(shard_root.glob("worker_*")) if shard_root.exists() else []
@@ -232,10 +241,18 @@ def prepare_workers(
                 shutil.rmtree(path)
             else:
                 path.unlink()
+    if overwrite:
+        from src.efficiency import TRACE_FILES, REPORT_FILES
+        from src.question_selection import SELECTION_FILES
+        for filename in tuple(TRACE_FILES.values()) + REPORT_FILES + SELECTION_FILES:
+            path = output_dir / filename
+            if path.is_file():
+                path.unlink()
     output_dir.mkdir(parents=True, exist_ok=True)
     shard_root.mkdir(parents=True, exist_ok=True)
 
-    shards = split_indices(total_questions, len(gpu_ids))
+    shards = [[selected_indices[position] for position in shard]
+              for shard in split_indices(len(selected_indices), len(gpu_ids))]
     workers: List[WorkerSpec] = []
     for worker_id, (gpu_id, indices) in enumerate(zip(gpu_ids, shards)):
         worker_dir = shard_root / f"worker_{worker_id:02d}"
@@ -284,6 +301,8 @@ def prepare_workers(
     manifest = {
         "schema_version": 1,
         "total_questions": int(total_questions),
+        "selected_count": len(selected_indices),
+        "question_indices": selected_indices,
         "worker_count": len(workers),
         "workers": [
             {
@@ -448,3 +467,12 @@ def merge_jev_traces(shard_dirs: Sequence[Path], output_dir: Path) -> int:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         total_records += len(records)
     return total_records
+
+
+def merge_efficiency_traces(shard_dirs: Sequence[Path], output_dir: Path):
+    """Keep original attempts and regenerate a canonical resume-aware report."""
+    from src.efficiency import TRACE_FILES
+    if not any((Path(directory) / filename).exists() for directory in shard_dirs for filename in TRACE_FILES.values()):
+        return None
+    from src.efficiency_report import build_report
+    return build_report(shard_dirs, output_dir, merge_traces=True)

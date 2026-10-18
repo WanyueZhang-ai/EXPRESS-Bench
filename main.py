@@ -40,6 +40,7 @@ from src.tsdf import TSDFPlanner
 from gpt import qwen3_vl
 from evaluation import score
 from src.plotting import save_and_close_figure
+from src.efficiency import current_profiler, profiled_run, apply_efficiency_cli
 from Jev_scripts.online_hook import (
     oracle_evidence_from_observation,
     router_from_config,
@@ -56,7 +57,9 @@ from InternDecision_scripts.runtime_policy import use_vlm_planner_perception
 from InternDecision_scripts.runtime_utils import scene_dataset_config_path
 
 
+@profiled_run
 def main(cfg, question_indices=None, progress_path=None, append_trace=False):
+    efficiency = current_profiler()
     camera_tilt = cfg.camera_tilt_deg * np.pi / 180
     jev_cfg = cfg.get("jev", {})
     jev_router = router_from_config(jev_cfg)
@@ -137,7 +140,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
         progress_state.update(updates)
         now = time.monotonic()
         if force or now - last_progress_write >= 2.0:
-            write_progress(progress_path, progress_state)
+            efficiency.measure("io.progress", write_progress, progress_path, progress_state, category="io")
             last_progress_write = now
 
     update_progress(force=True)
@@ -151,14 +154,15 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             image_for_answer = image_paths[0] if image_paths else None
             text = _qwen_call(answer_prompt, f"Q: {question_text}\nA: ", image_for_answer)
             return text.replace("A:", "").strip()
-        intern_runtime = runtime_from_config(intern_cfg, qwen_fn=_qwen_answer)
+        intern_runtime = efficiency.measure("initialization.intern_decision", runtime_from_config, intern_cfg,
+                                            qwen_fn=_qwen_answer, category="initialization")
     use_planner_perception = use_vlm_planner_perception(
         intern_enabled, intern_action_mode, evidence_mode=intern_evidence_mode
     )
     if intern_enabled and use_planner_perception:
         # Keep the planner VLM on the same worker GPU as Intern/Qwen.
         cfg.vlm.device = qwen_device
-    vlm = VLM(cfg.vlm) if use_planner_perception else None
+    vlm = efficiency.measure("initialization.planner_vlm", VLM, cfg.vlm, category="initialization") if use_planner_perception else None
     update_progress(force=True, status="running", phase="exploration")
 
     # Run all questions
@@ -167,6 +171,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
     for question_position, question_ind in enumerate(
         tqdm(question_indices, total=len(question_indices))
     ):
+        episode_scope = efficiency.begin_episode(question_ind, question_type=questions_data[question_ind]["type"])
         update_progress(
             force=True,
             status="running",
@@ -194,7 +199,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
 
         # Set up scene in Habitat
         if simulator is not None:
-            simulator.close()
+            efficiency.measure("simulator.close", simulator.close, category="simulator")
             simulator = None
         semantic_scene_dataset = None
         if (jev_enabled and jev_mode == "oracle_semantic") or (
@@ -226,7 +231,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             )
         }
         sim_cfg = make_simple_cfg(sim_settings)
-        simulator = habitat_sim.Simulator(sim_cfg)
+        simulator = efficiency.measure("initialization.simulator", habitat_sim.Simulator, sim_cfg, category="initialization")
         oracle_category_names = (
             semantic_category_names(simulator)
             if jev_enabled and jev_mode == "oracle_semantic"
@@ -234,7 +239,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
         )
         pathfinder = simulator.pathfinder
         pathfinder.seed(cfg.seed)
-        pathfinder.load_nav_mesh(navmesh_file)
+        efficiency.measure("initialization.navmesh", pathfinder.load_nav_mesh, navmesh_file, category="initialization")
         agent = simulator.initialize_agent(sim_settings["default_agent"])
         agent_state = habitat_sim.AgentState()
         pts = init_pts
@@ -274,7 +279,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
         result["path"] = {}
 
         # Initialize TSDF
-        tsdf_planner = TSDFPlanner(
+        tsdf_planner = efficiency.measure("initialization.tsdf", TSDFPlanner,
             vol_bnds=tsdf_bnds,
             voxel_size=cfg.tsdf_grid_size,
             regs=regs_list,
@@ -282,6 +287,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             floor_height_offset=0,
             pts_init=pos_habitat_to_normal(pts),
             init_clearance=cfg.init_clearance * 2,
+            category="initialization",
         )
 
         pts_pixs = np.empty((0, 2))
@@ -293,6 +299,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
         direct_forced_action = None
 
         for cnt_step in range(num_step):
+            step_scope = efficiency.begin_step(cnt_step, memory_device=qwen_device)
             update_progress(
                 phase="question",
                 current_question=question_ind,
@@ -306,7 +313,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             logging.info(f"Current pts: {pts}")
             agent_state.position = pts
             agent_state.rotation = rotation
-            agent.set_state(agent_state)
+            efficiency.measure("simulator.set_pose", agent.set_state, agent_state, category="simulator")
             pts_normal = pos_habitat_to_normal(pts)
             result["path"][step_name] = {"pts": agent_state.position, "rotation": agent_state.rotation}
 
@@ -321,13 +328,13 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             cam_pose_tsdf = pose_normal_to_tsdf(cam_pose_normal)
 
             # Get observation at current pose - skip black image, meaning robot is outside the floor
-            obs = simulator.get_sensor_observations()
+            obs = efficiency.measure("simulator.observe", simulator.get_sensor_observations, category="simulator")
             rgb = obs["color_sensor"]
             depth = obs["depth_sensor"]
 
             if cfg.save_obs or intern_enabled:
-                plt.imsave(
-                    os.path.join(episode_data_dir, "{}.png".format(cnt_step)), rgb
+                efficiency.measure("io.save_observation", plt.imsave,
+                    os.path.join(episode_data_dir, "{}.png".format(cnt_step)), rgb, category="io"
                 )
             num_black_pixels = np.sum(
                 np.sum(rgb, axis=-1) == 0
@@ -337,14 +344,14 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             img_path = os.path.abspath(os.path.join(episode_data_dir, f"{cnt_step}.png"))
             if num_black_pixels < cfg.black_pixel_ratio * img_width * img_height:
                 # TSDF fusion
-                tsdf_planner.integrate(
+                efficiency.measure("mapping.tsdf", tsdf_planner.integrate,
                     color_im=rgb,
                     depth_im=depth,
                     cam_intr=cam_intr,
                     cam_pose=cam_pose_tsdf,
                     obs_weight=1.0,
                     margin_h=int(cfg.margin_h_ratio * img_height),
-                    margin_w=int(cfg.margin_w_ratio * img_width),
+                    margin_w=int(cfg.margin_w_ratio * img_width), category="mapping"
                 )
 
                 # Terminate exploration with the VLM only for the vlm_state
@@ -367,6 +374,8 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     gen_answer = gen_answer.replace("A:", "").strip()
                     logging.info(f"gen_answer: {gen_answer}")
                     find_answer = True
+                    step_scope.update(outcome="answered", selected_action="stop")
+                    efficiency.end_step()
                     break
 
                 if use_planner_perception:
@@ -375,13 +384,13 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     # current-step map/candidate evidence.
                     prompt_points_pix = []
                     prompt_points_pix, fig1 = (
-                        tsdf_planner.find_prompt_points_within_view(
+                        efficiency.measure("planning.prompt_candidates", tsdf_planner.find_prompt_points_within_view,
                             pts_normal,
                             img_width,
                             img_height,
                             cam_intr,
                             cam_pose_tsdf,
-                            **cfg.visual_prompt,
+                            **cfg.visual_prompt, category="planning"
                         )
                     )
                     save_and_close_figure(
@@ -392,9 +401,9 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     # Get VLM prediction
                     rgb_im = Image.fromarray(rgb, mode="RGBA").convert("RGB")
                     draw_letters = ["A", "B", "C", "D"]
-                    fnt = ImageFont.truetype(
+                    fnt = efficiency.measure("io.load_font", ImageFont.truetype,
                         "data/Open_Sans/static/OpenSans-Regular.ttf",
-                        30,
+                        30, category="io"
                     )
                     actual_num_prompt_points = len(prompt_points_pix)
                     if actual_num_prompt_points >= cfg.visual_prompt.min_num_prompt_points:
@@ -420,8 +429,8 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                                 anchor="mm",
                                 font_size=12,
                             )
-                        rgb_im_draw.save(
-                            os.path.join(episode_data_dir, f"{cnt_step}_draw.png")
+                        efficiency.measure("io.save_prompt_image", rgb_im_draw.save,
+                            os.path.join(episode_data_dir, f"{cnt_step}_draw.png"), category="io"
                         )
 
                         prompt_lsv = f"\nConsider the question: '{question}', and you will explore the environment for answering it.\nWhich direction (black letters on the image) would you explore then? Answer with a single letter."
@@ -429,10 +438,11 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                             rgb_im_draw,
                             prompt_lsv,
                             draw_letters[:actual_num_prompt_points],
+                            purpose="local_direction_scoring",
                         )
                         lsv *= actual_num_prompt_points / 3
                         prompt_gsv = f"\nConsider the question: '{question}', and you will explore the environment for answering it. Is there any direction shown in the image worth exploring? Answer with Yes or No."
-                        gsv = vlm.get_loss(rgb_im, prompt_gsv, ["Yes", "No"])[0]
+                        gsv = vlm.get_loss(rgb_im, prompt_gsv, ["Yes", "No"], purpose="global_exploration_scoring")[0]
                         gsv = (
                             np.exp(gsv / cfg.gsv_T) / cfg.gsv_F
                         )
@@ -445,10 +455,10 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                         })
 
                         # Integrate semantics only if there is any prompted point
-                        tsdf_planner.integrate_sem(
+                        efficiency.measure("mapping.semantic", tsdf_planner.integrate_sem,
                             sem_pix=sv,
                             radius=1.0,
-                            obs_weight=1.0,
+                            obs_weight=1.0, category="mapping"
                         )
 
                         # Get region prediction
@@ -457,6 +467,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                             rgb_im,
                             prompt_reg,
                             letters,
+                            purpose="region_scoring",
                         )
                         array_reg = np.array(pred)
                         region = regions[np.argmax(array_reg)]
@@ -474,6 +485,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                                 rgb_im_draw,
                                 prompt_pt,
                                 draw_letters[:actual_num_prompt_points],
+                                purpose="region_point_scoring",
                             )
                             array_pt = np.array(pred)
                             point = draw_letters[np.argmax(array_pt)]
@@ -485,14 +497,14 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                             logging.info(f"Predicted point: {point}, Confidence: {point_confidence}")
 
                             # Update only the region with the highest probability and its coordinates
-                            tsdf_planner.integrate_reg(
+                            efficiency.measure("mapping.region", tsdf_planner.integrate_reg,
                                 [np.argmax(array_pt)],
                                 [np.argmax(array_reg)],
-                                radius=1.0,
+                                radius=1.0, category="mapping"
                             )
 
                         # Draw semantic map and region map
-                        fig2 = tsdf_planner.draw_map(regions_dict)
+                        fig2 = efficiency.measure("visualization.semantic_map", tsdf_planner.draw_map, regions_dict, category="visualization")
                         save_and_close_figure(
                             fig2,
                             os.path.join(episode_data_dir, "{}_map.png".format(cnt_step + 1)),
@@ -500,12 +512,13 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
 
             else:
                 logging.info("Skipping black image!")
+                step_scope.update(perception_skipped="black_image")
 
             # Determine whether to use GOE or FBE. The Intern branch shares
             # this exact candidate snapshot with Jev and runs before the
             # existing executor. The two backends are mutually exclusive.
             if regs_list != []:
-                state, exp_list = tsdf_planner.get_exp_state()
+                state, exp_list = efficiency.measure("planning.exploration_state", tsdf_planner.get_exp_state, category="planning")
             else:
                 state = True
                 exp_list = []
@@ -518,11 +531,11 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             if intern_enabled:
                 max_candidates = int(intern_cfg.get("max_candidates", 8))
                 region_names = {index: name for index, name in enumerate(regions)}
-                goe_candidates = summarize_goe(
-                    exp_list, region_names=region_names, max_candidates=max_candidates
+                goe_candidates = efficiency.measure("evidence.goe_candidates", summarize_goe,
+                    exp_list, region_names=region_names, max_candidates=max_candidates, category="evidence"
                 )
-                fbe_candidates = summarize_fbe_from_planner(
-                    tsdf_planner, max_candidates=max_candidates
+                fbe_candidates = efficiency.measure("evidence.fbe_candidates", summarize_fbe_from_planner,
+                    tsdf_planner, max_candidates=max_candidates, category="evidence"
                 )
                 baseline_mode = "fbe" if state else "goe"
                 if baseline_mode == "goe" and not exp_list:
@@ -540,12 +553,12 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                             "intern decision_objects requires the current Habitat semantic_sensor observation"
                         )
                     scene_objects = getattr(getattr(simulator, "semantic_scene", None), "objects", [])
-                    object_rows = visible_object_summaries(
+                    object_rows = efficiency.measure("evidence.objects", visible_object_summaries,
                         semantic_observation,
                         scene_objects,
-                        agent_position=agent.get_state().position,
+                        agent_position=agent.get_state().position, category="evidence"
                     )
-                intern_state = intern_runtime.evidence(
+                intern_state = efficiency.measure("evidence.prepare", intern_runtime.evidence,
                     question=question,
                     question_type=question_type,
                     history={
@@ -560,7 +573,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     image_path=img_path if intern_evidence_mode == "decision_image" else None,
                     objects=object_rows,
                     step=cnt_step,
-                    decision_id=f"{question_ind}:{cnt_step}",
+                    decision_id=f"{question_ind}:{cnt_step}", category="evidence"
                 )
                 intern_decision = intern_runtime.decide(
                     intern_state,
@@ -583,6 +596,8 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     seed=seed,
                 )
                 result["intern_decisions"].append(trace)
+                step_scope.update(selected_action=intern_decision.action, decision_fallback=intern_decision.fallback,
+                                  fallback_reason=intern_decision.fallback_reason)
                 if intern_decision.action == "stop":
                     answer_state = dict(intern_state)
                     if os.path.isfile(img_path):
@@ -593,9 +608,11 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     if answer_result.error_type:
                         result["answer_error_type"] = answer_result.error_type
                     logging.info("Intern answer status=%s: %s", answer_result.status, gen_answer)
-                    with open(intern_trace_path, "a", encoding="utf-8") as trace_file:
+                    with efficiency.span("io.decision_trace", category="io"), open(intern_trace_path, "a", encoding="utf-8") as trace_file:
                         trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
                     find_answer = True
+                    step_scope.update(outcome="answered")
+                    efficiency.end_step()
                     break
                 if intern_action_mode == "direct_actions":
                     configured_space = getattr(getattr(agent, "agent_config", None), "action_space", None)
@@ -608,7 +625,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     )
                     before = np.asarray(agent.get_state().position, dtype=float).copy()
                     def _step_direct(action_name):
-                        raw_observation = simulator.step(action_name)
+                        raw_observation = efficiency.measure("simulator.action", simulator.step, action_name, category="simulator")
                         after = np.asarray(agent.get_state().position, dtype=float)
                         collided = action_name == "move_forward" and bool(np.linalg.norm(after - before) < 1e-6)
                         return {"observation": raw_observation, "collided": collided}
@@ -629,21 +646,24 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                         last_pts = pts
                     if action_result.collided:
                         direct_forced_action = direct_executor.safe_action_for_next_cycle(action_result)
-                    with open(intern_trace_path, "a", encoding="utf-8") as trace_file:
+                    with efficiency.span("io.decision_trace", category="io"), open(intern_trace_path, "a", encoding="utf-8") as trace_file:
                         trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
+                    step_scope.update(outcome="action_executed", collision=action_result.collided,
+                                      executed_action=action_result.action)
+                    efficiency.end_step()
                     continue
-                with open(intern_trace_path, "a", encoding="utf-8") as trace_file:
+                with efficiency.span("io.decision_trace", category="io"), open(intern_trace_path, "a", encoding="utf-8") as trace_file:
                     trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
                 execution_state = intern_decision.action == "fbe"
                 if intern_decision.action == "goe" and not intern_decision.fallback:
                     jev_region_index = target_index(intern_decision.target_id, "goe")
             elif jev_enabled:
                 region_names = {index: name for index, name in enumerate(regions)}
-                goe_candidates = summarize_goe(
-                    exp_list, region_names=region_names, max_candidates=int(jev_cfg.get("max_candidates", 8))
+                goe_candidates = efficiency.measure("evidence.goe_candidates", summarize_goe,
+                    exp_list, region_names=region_names, max_candidates=int(jev_cfg.get("max_candidates", 8)), category="evidence"
                 )
-                fbe_candidates = summarize_fbe_from_planner(
-                    tsdf_planner, max_candidates=int(jev_cfg.get("max_candidates", 8))
+                fbe_candidates = efficiency.measure("evidence.fbe_candidates", summarize_fbe_from_planner,
+                    tsdf_planner, max_candidates=int(jev_cfg.get("max_candidates", 8)), category="evidence"
                 )
                 baseline_mode = "fbe" if state else "goe"
                 if baseline_mode == "goe" and not exp_list:
@@ -687,7 +707,9 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     mode=jev_mode,
                 )
                 result["jev_decisions"].append(trace)
-                with open(jev_trace_path, "a", encoding="utf-8") as trace_file:
+                step_scope.update(selected_action=jev_decision.action, decision_fallback=jev_decision.fallback,
+                                  fallback_reason=jev_decision.fallback_reason)
+                with efficiency.span("io.decision_trace", category="io"), open(jev_trace_path, "a", encoding="utf-8") as trace_file:
                     trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
                 if jev_decision.action == "stop":
                     ex_prompt = f"Q: {question}\nA: "
@@ -695,6 +717,8 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     gen_answer = gen_answer.replace("A:", "").strip()
                     logging.info(f"gen_answer: {gen_answer}")
                     find_answer = True
+                    step_scope.update(outcome="answered")
+                    efficiency.end_step()
                     break
                 execution_state = jev_decision.action == "fbe"
                 if jev_decision.action == "goe" and not jev_decision.fallback:
@@ -702,40 +726,41 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
 
             # GOE
             if execution_state == False:
+                step_scope.update(execution_mode="goe")
                 agent_state = agent.get_state()
                 cur_pt = agent_state.position
-                pts_normal, pts_pix, fig3 = tsdf_planner.find_next_point_region(
-                    cur_pt, regions_dict, region_index=jev_region_index
+                pts_normal, pts_pix, fig3 = efficiency.measure("planning.goe", tsdf_planner.find_next_point_region,
+                    cur_pt, regions_dict, region_index=jev_region_index, category="planning"
                 )
                 pts_normal = np.append(pts_normal, floor_height)
                 pts = pos_normal_to_habitat(pts_normal)
-                pts = pathfinder.snap_point(pts)
+                pts = efficiency.measure("planning.snap_point", pathfinder.snap_point, pts, category="planning")
                 reg = [i["count"] for i in exp_list]
                 idx = jev_region_index if jev_region_index is not None else int(np.argmax(reg))
                 direction = exp_list[idx]["dir"]
                 if direction == 0:
-                    pts = pathfinder.snap_point(pts)
+                    pts = efficiency.measure("planning.snap_point", pathfinder.snap_point, pts, category="planning")
                     path = habitat_sim.ShortestPath()
                     path.requested_start = np.array(last_pts)
                     path.requested_end = pts
-                    found_path = simulator.pathfinder.find_path(path)
+                    found_path = efficiency.measure("planning.find_path", simulator.pathfinder.find_path, path, category="planning")
                     start_time = time.time()
                     while not found_path:
                         end_time = time.time()
                         if end_time - start_time > 60:
                             break
                         plt.close(fig3)
-                        pts_normal, pts_pix, fig3 = tsdf_planner.find_next_point_region(
-                            cur_pt, regions_dict, region_index=jev_region_index
+                        pts_normal, pts_pix, fig3 = efficiency.measure("planning.goe", tsdf_planner.find_next_point_region,
+                            cur_pt, regions_dict, region_index=jev_region_index, category="planning"
                         )
                         pts_normal = np.append(pts_normal, floor_height)
                         pts = pos_normal_to_habitat(pts_normal)
-                        pts = pathfinder.snap_point(pts)
+                        pts = efficiency.measure("planning.snap_point", pathfinder.snap_point, pts, category="planning")
                         simulator.pathfinder.seed(seed)
                         path = habitat_sim.ShortestPath()
                         path.requested_start = np.array(last_pts)
                         path.requested_end = pts
-                        found_path = simulator.pathfinder.find_path(path)
+                        found_path = efficiency.measure("planning.find_path", simulator.pathfinder.find_path, path, category="planning")
                     if found_path:
                         path_len += path.geodesic_distance
                         save_and_close_figure(
@@ -747,7 +772,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                 else:
                     plt.close(fig3)
                     for _ in range(3):
-                        obs = simulator.step("turn_left")
+                        obs = efficiency.measure("simulator.action", simulator.step, "turn_left", category="simulator")
                     agent_state = agent.get_state()
                     pts = agent_state.position
                     rotation = agent_state.rotation
@@ -757,20 +782,22 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
 
             # FBE
             if (execution_state == True) or (found_path == False):
-                pts_normal, angle, pts_pix, fig4 = tsdf_planner.find_next_pose(
+                step_scope.update(execution_mode="fbe")
+                pts_normal, angle, pts_pix, fig4 = efficiency.measure("planning.fbe", tsdf_planner.find_next_pose,
                     pts=pts_normal,
                     angle=angle,
                     flag_no_val_weight=cnt_step < cfg.min_random_init_steps,
-                    **cfg.planner,
+                    **cfg.planner, category="planning"
                 )
                 pts_pixs = np.vstack((pts_pixs, pts_pix))
                 pts_normal = np.append(pts_normal, floor_height)
                 pts = pos_normal_to_habitat(pts_normal)
 
                 # Add path to ax5, with colormap to indicate order
-                ax5 = fig4.axes[4]
-                ax5.plot(pts_pixs[:, 1], pts_pixs[:, 0], linewidth=5, color="black")
-                ax5.scatter(pts_pixs[0, 1], pts_pixs[0, 0], c="white", s=50)
+                with efficiency.span("visualization.path_overlay", category="visualization"):
+                    ax5 = fig4.axes[4]
+                    ax5.plot(pts_pixs[:, 1], pts_pixs[:, 0], linewidth=5, color="black")
+                    ax5.scatter(pts_pixs[0, 1], pts_pixs[0, 0], c="white", s=50)
                 save_and_close_figure(
                     fig4,
                     os.path.join(episode_data_dir, "{}_semantic.png".format(cnt_step + 1)),
@@ -781,17 +808,19 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     * quat_from_angle_axis(camera_tilt, np.array([1, 0, 0]))
                 ).tolist()
 
-                pts = pathfinder.snap_point(pts)
+                pts = efficiency.measure("planning.snap_point", pathfinder.snap_point, pts, category="planning")
                 if np.isnan(pts).any():
-                    pts = pathfinder.get_random_navigable_point_near(last_pts, 3)
+                    pts = efficiency.measure("planning.random_point", pathfinder.get_random_navigable_point_near, last_pts, 3, category="planning")
                 path = habitat_sim.ShortestPath()
                 path.requested_start = np.array(last_pts)
                 path.requested_end = pts
-                found_path = simulator.pathfinder.find_path(path)
+                found_path = efficiency.measure("planning.find_path", simulator.pathfinder.find_path, path, category="planning")
                 if found_path:
                     path_len += path.geodesic_distance
 
             last_pts = pts
+            step_scope.update(outcome="planned", path_found=bool(found_path))
+            efficiency.end_step()
 
 
         if not find_answer:
@@ -809,9 +838,12 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                 gen_answer = gen_answer.replace("A:", "").strip()
             logging.info(f"gen_answer: {gen_answer}")
 
+        episode_scope.update(task_completion_ms=episode_scope.elapsed_ms())
         ex_prompt = f"Question: {question}\nAnswer: {answer}\nResponse: {gen_answer}\nYour mark: "
         img_path = os.path.join(episode_data_dir, f"{cnt_step}.png")
-        EAC = _qwen_call(score_prompt, ex_prompt, img_path)
+        with efficiency.span("evaluation.eac", category="evaluation") as evaluation_scope:
+            EAC = _qwen_call(score_prompt, ex_prompt, img_path)
+            episode_scope.update(evaluation_ms=evaluation_scope.elapsed_ms())
 
         # Episode summary
         logging.info(f"\n== Episode Summary")
@@ -828,7 +860,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
         path = habitat_sim.ShortestPath()
         path.requested_start = np.array(pts)
         path.requested_end = np.array(goal_pts)
-        found_path = simulator.pathfinder.find_path(path)
+        found_path = efficiency.measure("planning.find_path", simulator.pathfinder.find_path, path, category="planning")
         goal_dis = path.geodesic_distance
 
         result.update({
@@ -844,14 +876,17 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             "goal_dis": goal_dis,
             "path_len": path_len,
         })
+        episode_scope.update(path_length_m=float(path_len), goal_distance_m=float(goal_dis),
+                             answer_status=result.get("answer_status", "ok"), eac=EAC,
+                             geodesic_distance=float(question_data["geodesic_distance"]))
 
         # Save data
         results_all.append(result)
         with open(os.path.join(episode_data_dir, f"result.pkl"), "wb") as f:
-            pickle.dump(result, f)
+            efficiency.measure("io.save_results", pickle.dump, result, f, category="io")
         if (question_ind+1) % cfg.save_freq == 0:
             with open(os.path.join(output_dir, f"results_{question_ind+1}.pkl"), "wb") as f:
-                pickle.dump(results_all, f)
+                efficiency.measure("io.save_results", pickle.dump, results_all, f, category="io")
         update_progress(
             force=True,
             phase="question",
@@ -861,13 +896,14 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
             current_step=None,
             last_completed_question=question_ind,
         )
+        efficiency.end_episode()
 
     if simulator is not None:
-        simulator.close()
+        efficiency.measure("simulator.close", simulator.close, category="simulator")
         simulator = None
     # Save all data again
     with open(os.path.join(output_dir, "results.pkl"), "wb") as f:
-        pickle.dump(results_all, f)
+        efficiency.measure("io.save_results", pickle.dump, results_all, f, category="io")
     C_avg, C_star_avg, E_path, d_T_avg = score(results_all)
     logging.info(f"\nC_avg: {C_avg}\nC_star_avg: {C_star_avg}\nE_path: {E_path}\nd_T_avg: {d_T_avg}")
     update_progress(
@@ -884,6 +920,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
 if __name__ == "__main__":
     import argparse
     from omegaconf import OmegaConf
+    from src.question_selection import add_selection_arguments, resolve_cli_selection, save_selection
 
     # Get config path
     parser = argparse.ArgumentParser()
@@ -891,11 +928,7 @@ if __name__ == "__main__":
         "-cf", "--cfg_file", "--cfg-file",
         help="cfg file path", default="", type=str
     )
-    parser.add_argument(
-        "--indices-file",
-        help="JSON list of original question indices to process",
-        default=None, type=str,
-    )
+    add_selection_arguments(parser)
     parser.add_argument(
         "--output-dir",
         help="override cfg.output_dir (used by parallel workers)",
@@ -911,18 +944,17 @@ if __name__ == "__main__":
         help="append Jev decisions when resuming an existing shard",
         action="store_true",
     )
+    parser.add_argument("--efficiency", action="store_true", help="enable efficiency traces and reports")
+    parser.add_argument("--efficiency-mode", choices=["light", "detailed"], default=None)
     args = parser.parse_args()
     cfg = OmegaConf.load(args.cfg_file)
+    apply_efficiency_cli(cfg, enabled=args.efficiency, mode=args.efficiency_mode)
     OmegaConf.resolve(cfg)
     if args.output_dir is not None:
         cfg.output_dir = args.output_dir
 
-    question_indices = None
-    if args.indices_file is not None:
-        with open(args.indices_file, "r", encoding="utf-8") as handle:
-            question_indices = json.load(handle)
-        if not isinstance(question_indices, list):
-            raise ValueError("--indices-file must contain a JSON list")
+    question_indices, selection = resolve_cli_selection(cfg, args)
+    save_selection(cfg.output_dir, selection)
 
     # Set up logging
     output_dir = cfg.output_dir

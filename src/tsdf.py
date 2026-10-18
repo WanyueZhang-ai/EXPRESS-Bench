@@ -34,6 +34,7 @@ from numba import njit, prange
 import random
 import logging
 import matplotlib.pyplot as plt
+from src.efficiency import current_profiler
 import scipy.ndimage as ndimage
 from skimage import measure
 from sklearn.cluster import DBSCAN
@@ -435,37 +436,38 @@ class TSDFPlanner:
         next_point_normal = next_point * self._voxel_size + self._vol_origin[:2]
         self.exped_point.append(list(next_point))
 
-        # Plot
-        letters = list(regions_dict.keys())
-        regions = list(regions_dict.values())
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(27, 10))
-        cur_point = self.world2vox(cur_pt)
-        region = regions[region_value]
+        with current_profiler().span("visualization.draw", category="visualization"):
+            # Plot
+            letters = list(regions_dict.keys())
+            regions = list(regions_dict.values())
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(27, 10))
+            cur_point = self.world2vox(cur_pt)
+            region = regions[region_value]
 
-        color_list = ['#CAE1FF', '#9BCD9B', '#8DB6CD', '#EECBAD', '#CDB5CD', '#C1FFC1', '#DEB887', '#ADD8E6', '#E9967A', '#EED2EE', '#FFC0CB', '#CDB7B5', '#B4CDCD', '#EED5D2', '#EEE8AA', '#B0C4DE', '#C1CDC1', '#FDF5E6', '#90EE90', '#EEEEEE']
-        val_region_cpu = self._val_region_cpu
-        mask = val_region_cpu == -1
-        val_region_cpu[mask] = regions.index("unknown")
-        types = np.unique(val_region_cpu)
-        new_colors = [color_list[int(i)] for i in types]
-        cmap = colors.ListedColormap(new_colors)
-        mapping = {int(value): idx for idx, value in enumerate(types)}
-        mapped_val_region_cpu = np.vectorize(mapping.get)(val_region_cpu)
-        cax = ax1.imshow(mapped_val_region_cpu, cmap=cmap)
-        cbar = fig.colorbar(cax, orientation="vertical", ax=ax1, fraction=0.046, pad=0.04)
-        cbar.set_ticks(np.arange(0, len(types)))
-        cbar.set_ticklabels([regions[int(i)] for i in types])
-        ax1.set_title("Functional region semantic map")
+            color_list = ['#CAE1FF', '#9BCD9B', '#8DB6CD', '#EECBAD', '#CDB5CD', '#C1FFC1', '#DEB887', '#ADD8E6', '#E9967A', '#EED2EE', '#FFC0CB', '#CDB7B5', '#B4CDCD', '#EED5D2', '#EEE8AA', '#B0C4DE', '#C1CDC1', '#FDF5E6', '#90EE90', '#EEEEEE']
+            val_region_cpu = self._val_region_cpu
+            mask = val_region_cpu == -1
+            val_region_cpu[mask] = regions.index("unknown")
+            types = np.unique(val_region_cpu)
+            new_colors = [color_list[int(i)] for i in types]
+            cmap = colors.ListedColormap(new_colors)
+            mapping = {int(value): idx for idx, value in enumerate(types)}
+            mapped_val_region_cpu = np.vectorize(mapping.get)(val_region_cpu)
+            cax = ax1.imshow(mapped_val_region_cpu, cmap=cmap)
+            cbar = fig.colorbar(cax, orientation="vertical", ax=ax1, fraction=0.046, pad=0.04)
+            cbar.set_ticks(np.arange(0, len(types)))
+            cbar.set_ticklabels([regions[int(i)] for i in types])
+            ax1.set_title("Functional region semantic map")
         
-        im = ax2.imshow(val_vol_2d)
-        fig.colorbar(im, orientation="vertical", ax=ax2, fraction=0.046, pad=0.04)
-        ax2.set_title("Global semantic map")
+            im = ax2.imshow(val_vol_2d)
+            fig.colorbar(im, orientation="vertical", ax=ax2, fraction=0.046, pad=0.04)
+            ax2.set_title("Global semantic map")
         
-        im = ax3.imshow(masked_val_vol_2d)
-        fig.colorbar(im, orientation="vertical", ax=ax3, fraction=0.046, pad=0.04)
-        ax3.scatter(next_point[1], next_point[0], c="g", s=30, label="next point")
-        ax3.scatter(cur_point[1], cur_point[0], c="b", s=30, label="current")
-        ax3.set_title(f"Masked semantic map({region})")
+            im = ax3.imshow(masked_val_vol_2d)
+            fig.colorbar(im, orientation="vertical", ax=ax3, fraction=0.046, pad=0.04)
+            ax3.scatter(next_point[1], next_point[0], c="g", s=30, label="next point")
+            ax3.scatter(cur_point[1], cur_point[0], c="b", s=30, label="current")
+            ax3.set_title(f"Masked semantic map({region})")
 
         return next_point_normal, next_point, fig
 
@@ -783,20 +785,21 @@ class TSDFPlanner:
             [frontiers_in_view, unoccupied_reachable_in_view], axis=0
         )
 
-        # initialize plot
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 8))
-        ax1.imshow(unoccupied)
-        ax1.scatter(cur_point[1], cur_point[0], c="b", s=30)
-        for point in candidates_pre_cluster:
-            ax1.scatter(point[1], point[0], c="r", s=8, alpha=0.5)
-        ax1.set_title("Unoccupied")
-        ax2.imshow(unexplored)
-        ax2.scatter(cur_point[1], cur_point[0], c="b", s=30)
-        for point in frontiers_in_view:
-            ax2.scatter(point[1], point[0], c="r", s=8, alpha=0.5)
-        ax2.set_title("Unexplored")
-        ax3.imshow(island)
-        ax3.set_title("Island")
+        with current_profiler().span("visualization.draw", category="visualization"):
+            # initialize plot
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 8))
+            ax1.imshow(unoccupied)
+            ax1.scatter(cur_point[1], cur_point[0], c="b", s=30)
+            for point in candidates_pre_cluster:
+                ax1.scatter(point[1], point[0], c="r", s=8, alpha=0.5)
+            ax1.set_title("Unoccupied")
+            ax2.imshow(unexplored)
+            ax2.scatter(cur_point[1], cur_point[0], c="b", s=30)
+            for point in frontiers_in_view:
+                ax2.scatter(point[1], point[0], c="r", s=8, alpha=0.5)
+            ax2.set_title("Unexplored")
+            ax3.imshow(island)
+            ax3.set_title("Island")
 
         # cluster, or return none
         if len(candidates_pre_cluster) < min_points_for_clustering:
@@ -818,10 +821,11 @@ class TSDFPlanner:
             self.candidates = candidates
             logging.info(f"Number of final candidates: {len(candidates)}")
 
-            # add final points to plots
-            for ax in [ax1, ax2]:
-                for point in candidates:
-                    ax.scatter(point[1], point[0], c="g", s=30)
+            with current_profiler().span("visualization.draw", category="visualization"):
+                # add final points to plots
+                for ax in [ax1, ax2]:
+                    for point in candidates:
+                        ax.scatter(point[1], point[0], c="g", s=30)
 
             # Convert to pixel coordinates
             if len(candidates) > 0:
@@ -1107,46 +1111,47 @@ class TSDFPlanner:
             self.target_direction = None
             self.max_point = None
 
-        # Plot
-        fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3, figsize=(20, 18))
-        ax1.imshow(unoccupied)
-        ax1.scatter(max_point[1], max_point[0], c="r", s=30, label="max")
-        ax1.scatter(cur_point[1], cur_point[0], c="b", s=30, label="current")
-        ax1.scatter(next_point[1], next_point[0], c="g", s=30, label="actual")
-        ax1.set_title("Unoccupied")
-        ax2.imshow(island)
-        ax2.set_title("Island")
-        ax3.imshow(unexplored_neighbors)
-        for point in frontiers_pre_cluster:
-            ax3.scatter(point[1], point[0], color="white", s=20, alpha=1)
-        ax3.set_title("Unexplored neighbors")
-        im = ax4.imshow(val_vol_2d)
-        for point in frontiers:
-            ax4.scatter(point[1], point[0], color="white", s=20, alpha=1)
-        fig.colorbar(im, orientation="vertical", ax=ax4, fraction=0.046, pad=0.04)
-        ax4.scatter(max_point[1], max_point[0], c="r", s=30, label="max")
-        ax4.scatter(cur_point[1], cur_point[0], c="b", s=30, label="current")
-        ax4.scatter(next_point[1], next_point[0], c="g", s=30, label="actual")
-        ax4.quiver(
-            next_point[1],
-            next_point[0],
-            direction[1],
-            direction[0],
-            color="r",
-            scale=5,
-            angles="xy",
-            alpha=0.2,
-        )
-        ax4.set_title("Current sem values")
-        im = ax5.imshow(island)
-        ax5.set_title("Path on island")
-        frontier_weights = np.zeros_like(val_vol_2d)
-        for point, weight in zip(frontiers, frontiers_weight):
-            frontier_weights[point[0], point[1]] = weight
-        im = ax6.imshow(frontier_weights)
-        fig.colorbar(im, orientation="vertical", ax=ax6, fraction=0.046, pad=0.04)
-        ax6.scatter(max_point[1], max_point[0], c="r", s=20, label="max")
-        ax6.set_title("Frontier weights")
+        with current_profiler().span("visualization.draw", category="visualization"):
+            # Plot
+            fig, ((ax1, ax2, ax3), (ax4, ax5, ax6)) = plt.subplots(2, 3, figsize=(20, 18))
+            ax1.imshow(unoccupied)
+            ax1.scatter(max_point[1], max_point[0], c="r", s=30, label="max")
+            ax1.scatter(cur_point[1], cur_point[0], c="b", s=30, label="current")
+            ax1.scatter(next_point[1], next_point[0], c="g", s=30, label="actual")
+            ax1.set_title("Unoccupied")
+            ax2.imshow(island)
+            ax2.set_title("Island")
+            ax3.imshow(unexplored_neighbors)
+            for point in frontiers_pre_cluster:
+                ax3.scatter(point[1], point[0], color="white", s=20, alpha=1)
+            ax3.set_title("Unexplored neighbors")
+            im = ax4.imshow(val_vol_2d)
+            for point in frontiers:
+                ax4.scatter(point[1], point[0], color="white", s=20, alpha=1)
+            fig.colorbar(im, orientation="vertical", ax=ax4, fraction=0.046, pad=0.04)
+            ax4.scatter(max_point[1], max_point[0], c="r", s=30, label="max")
+            ax4.scatter(cur_point[1], cur_point[0], c="b", s=30, label="current")
+            ax4.scatter(next_point[1], next_point[0], c="g", s=30, label="actual")
+            ax4.quiver(
+                next_point[1],
+                next_point[0],
+                direction[1],
+                direction[0],
+                color="r",
+                scale=5,
+                angles="xy",
+                alpha=0.2,
+            )
+            ax4.set_title("Current sem values")
+            im = ax5.imshow(island)
+            ax5.set_title("Path on island")
+            frontier_weights = np.zeros_like(val_vol_2d)
+            for point, weight in zip(frontiers, frontiers_weight):
+                frontier_weights[point[0], point[1]] = weight
+            im = ax6.imshow(frontier_weights)
+            fig.colorbar(im, orientation="vertical", ax=ax6, fraction=0.046, pad=0.04)
+            ax6.scatter(max_point[1], max_point[0], c="r", s=20, label="max")
+            ax6.set_title("Frontier weights")
 
         # Convert back to world coordinates
         next_point_normal = next_point * self._voxel_size + self._vol_origin[:2]

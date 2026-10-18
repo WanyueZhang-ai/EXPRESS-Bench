@@ -76,3 +76,10 @@ jev:
   stop_threshold: 0.75
   min_choice_confidence: 0.0
   max_candidates: 8
+
+# Optional efficiency analysis. Detailed mode synchronizes CUDA phase boundaries.
+efficiency:
+  enabled: false
+  mode: light  # light or detailed
+  warmup_calls: 1  # label first N calls per worker/model/purpose/modality
+  report: true

@@ -11,6 +11,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional, Type
+from src.efficiency_models import model_call
 
 
 DEFAULT_CHECKPOINT = "/ssd/wyzhang/all_models/Intern-Decision-4B"
@@ -143,15 +144,25 @@ class InternDecisionEngine:
         """Run one immutable request through the local model."""
         if not isinstance(request, Mapping):
             raise TypeError("Intern-Decision request must be a mapping")
-        request_copy = copy.deepcopy(dict(request))
-        try:
-            response = self._engine.predict(request_copy)
-        except InternDecisionError:
-            raise
-        except Exception as exc:
-            raise InternDecisionInferenceError(
-                f"Intern-Decision inference failed: {exc.__class__.__name__}: {exc}"
-            ) from exc
-        if not isinstance(response, Mapping):
-            raise InternDecisionInferenceError("Intern-Decision response must be a mapping")
-        return copy.deepcopy(dict(response))
+        images = request.get("images")
+        images = images if isinstance(images, (list, tuple)) else []
+        questions = request.get("questions")
+        questions = questions if isinstance(questions, Mapping) else {}
+        with model_call("intern_decision", "final_answer" if set(questions) == {"answer"} else "decision",
+                        input_modality="text_image" if images else "text", output_kind="decision",
+                        device=self.model_kwargs["device"], image_count=len(images),
+                        checkpoint=str(self.checkpoint), candidate_count=sum(len(q["criteria"]) for q in questions.values() if isinstance(q, Mapping) and isinstance(q.get("criteria"), Mapping))) as call:
+            request_copy = copy.deepcopy(dict(request))
+            try:
+                with call.observe(self._engine):
+                    response = self._engine.predict(request_copy)
+            except InternDecisionError:
+                raise
+            except Exception as exc:
+                raise InternDecisionInferenceError(
+                    f"Intern-Decision inference failed: {exc.__class__.__name__}: {exc}"
+                ) from exc
+            if not isinstance(response, Mapping):
+                raise InternDecisionInferenceError("Intern-Decision response must be a mapping")
+            call.set_response(response)
+            return copy.deepcopy(dict(response))

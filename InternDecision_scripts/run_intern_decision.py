@@ -16,6 +16,8 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.question_selection import add_selection_arguments, resolve_cli_selection, save_selection
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -25,10 +27,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--answer-backend", choices=["qwen_vl", "intern_decision"], default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--device", default=None)
-    parser.add_argument("--indices-file", default=None)
+    add_selection_arguments(parser)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--progress-file", default=None)
     parser.add_argument("--append-trace", action="store_true")
+    parser.add_argument("--efficiency", action="store_true")
+    parser.add_argument("--efficiency-mode", choices=["light", "detailed"], default=None)
     parser.add_argument(
         "--clean-output",
         action="store_true",
@@ -63,6 +67,8 @@ def main() -> int:
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.load(args.cfg_file)
+    from src.efficiency import apply_efficiency_cli
+    apply_efficiency_cli(cfg, enabled=args.efficiency, mode=args.efficiency_mode)
     if "intern_decision" not in cfg or cfg.intern_decision is None:
         cfg.intern_decision = OmegaConf.create({})
     cfg.intern_decision.enabled = True
@@ -79,9 +85,12 @@ def main() -> int:
     if args.output_dir is not None:
         cfg.output_dir = args.output_dir
     OmegaConf.resolve(cfg)
+    question_indices, selection = resolve_cli_selection(cfg, args)
 
     if args.dry_run:
         print(OmegaConf.to_yaml(cfg))
+        if selection is not None:
+            print("Question selection: " + json.dumps(selection, ensure_ascii=False))
         return 0
 
     if args.clean_output and args.append_trace:
@@ -92,19 +101,13 @@ def main() -> int:
     if args.clean_output:
         from InternDecision_scripts.runtime_utils import clean_output_dir
         clean_output_dir(output_dir)
+    save_selection(output_dir, selection)
 
     from main import main as benchmark_main
 
     # Importing main loads Prismatic, whose logging configuration replaces
     # existing root handlers. Configure the worker only after that import.
     configure_worker_logging(output_dir, append_trace=args.append_trace)
-
-    question_indices = None
-    if args.indices_file:
-        with open(args.indices_file, "r", encoding="utf-8") as handle:
-            question_indices = json.load(handle)
-        if not isinstance(question_indices, list):
-            raise ValueError("--indices-file must contain a JSON list")
 
     benchmark_main(
         cfg,

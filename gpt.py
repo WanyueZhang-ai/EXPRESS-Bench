@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 from typing import Optional
+from src.efficiency import current_profiler
+from src.efficiency_models import model_call
 
 
 QWEN3_VL_MODEL_PATH = os.environ.get(
@@ -83,7 +85,23 @@ def qwen3_vl(
 
     import torch
 
-    prompt_system, prompt = prompt_make(prompt_path, ex_prompt)
+    efficiency = current_profiler()
+    if _MODEL is None:
+        model, processor = efficiency.measure("initialization.qwen3_vl", _load_qwen3_vl, device=device, category="initialization")
+    else:
+        model, processor = _load_qwen3_vl(device=device)
+    purpose = {"region": "region_selection", "explore": "stop_check", "answer": "final_answer",
+               "random_answer": "fallback_answer", "evaluation": "eac_evaluation"}.get(Path(prompt_path).stem, "generation")
+    with model_call("qwen3_vl", purpose, input_modality="text_image" if img_path is not None else "text",
+                    output_kind="generation", device=model.device, checkpoint=QWEN3_VL_MODEL_PATH,
+                    image_count=int(img_path is not None), max_new_tokens=512, do_sample=False) as call:
+        return _qwen_generate(model, processor, prompt_path, ex_prompt, img_path, call, efficiency)
+
+
+def _qwen_generate(model, processor, prompt_path, ex_prompt, img_path, call, efficiency):
+    import torch
+
+    prompt_system, prompt = efficiency.measure("input.prompt", prompt_make, prompt_path, ex_prompt)
     user_content = []
     if img_path is not None:
         image_path = Path(img_path).expanduser()
@@ -96,28 +114,29 @@ def qwen3_vl(
         {"role": "user", "content": user_content},
     ]
 
-    model, processor = _load_qwen3_vl(device=device)
-    inputs = processor.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_dict=True,
-        return_tensors="pt",
-    )
-    inputs = inputs.to(model.device)
+    with efficiency.span("input.processor"):
+        inputs = processor.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors="pt",
+        )
+    visual_id = getattr(model.config, "image_token_id", None)
+    call.set_inputs(inputs, visual_token_ids={visual_id} if isinstance(visual_id, int) else None,
+                    source="processor_expanded_input_ids")
+    with efficiency.span("input.to_device", device=model.device):
+        inputs = inputs.to(model.device)
 
-    with torch.inference_mode():
+    with torch.inference_mode(), call.observe(model), efficiency.span("generation", device=model.device):
         generated_ids = model.generate(
             **inputs,
             do_sample=False,
             max_new_tokens=512,
+            **call.streamer_kwargs(),
         )
 
     generated_ids_trimmed = [
         out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
-    return processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0].strip()
+    call.set_generated(generated_ids_trimmed)
+    with efficiency.span("output.decode"):
+        return processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+        )[0].strip()
