@@ -16,7 +16,7 @@
 
 ## Verified
 
-- Full `unittest` discovery in `express-intern`: 95 tests passed after the final score-field edit.
+- Full `unittest` discovery in `express-intern`: 98 tests passed after the final trace and candidate-budget edits.
 - No-GPU smoke: one model call and three fields for one candidate.
 - Config dry-run, Python compile, and `git diff --check` passed.
 - Fixed question index 0 on real Habitat with Intern-Decision and Qwen: first decision made one forward with five fields for two candidates; budget stop made zero calls; PathFinder waypoint placement and result pickle succeeded. The run is wiring validation, not a benchmark comparison.

@@ -86,8 +86,8 @@ indices.
 
 `GeometryCandidateGenerator` extracts reachable frontier proposals from TSDF
 occupancy/exploration volumes and Habitat path checks. FBE features include
-stable ID, relative direction, distance bin, frontier/new-voxel estimates, and
-feasibility. It does not use semantic values produced by Fine-EQA. The
+stable ID, relative direction, distance, and frontier/new-voxel estimates.
+Reachability is checked before exposing a candidate. It does not use semantic values produced by Fine-EQA. The
 checkpoint supports at most 16 decision fields, so a single-forward request
 contains at most seven candidates (one Verifier and two fields per candidate).
 
@@ -201,8 +201,8 @@ existing planner instance and does not call semantic region methods.
 4. Inspect the trace for at most one call per decision, no forbidden state fields,
    no `invalid_target` fallback field, and accurate candidate-to-executor mapping.
 5. In a later fixed 100-question comparison, report C, C*, E_path, d_T, actual
-   path, stop rate, no-progress tail, collision rate, fallback rate, and
-   evidence gain. Keep the old Fine-EQA results as a comparison only; they are
+   path, stop rate, no-progress tail, route failure rate, fallback rate, and
+   evidence gain. Physical collision rate requires an action controller. Keep the old Fine-EQA results as a comparison only; they are
    not used to execute the new branch.
 
 ## Risks
