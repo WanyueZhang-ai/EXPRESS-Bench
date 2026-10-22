@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 QWEN3_VL_MODEL_PATH = os.environ.get(
@@ -67,10 +67,26 @@ def _load_qwen3_vl(device=None):
     return _MODEL, _PROCESSOR
 
 
+
+def normalize_image_paths(
+    img_path: str | Path | Sequence[str | Path], *, max_images: int = 4
+) -> list[Path]:
+    """Normalize one image or a bounded sequence while retaining input order."""
+    if max_images < 1:
+        raise ValueError("max_images must be positive")
+    values = [img_path] if isinstance(img_path, (str, Path)) else list(img_path)
+    if not values:
+        raise ValueError("image count must be positive")
+    paths = [Path(value).expanduser() for value in values[:max_images]]
+    if any(not str(path) for path in paths):
+        raise ValueError("image paths must be non-empty")
+    return paths
+
+
 def qwen3_vl(
     prompt_path: str,
     ex_prompt: str,
-    img_path: Optional[str] = None,
+    img_path: Optional[str | Sequence[str]] = None,
     *,
     device: Optional[str] = None,
 ) -> str:
@@ -86,10 +102,10 @@ def qwen3_vl(
     prompt_system, prompt = prompt_make(prompt_path, ex_prompt)
     user_content = []
     if img_path is not None:
-        image_path = Path(img_path).expanduser()
-        if not image_path.is_file():
-            raise FileNotFoundError(f"Input image does not exist: {image_path}")
-        user_content.append({"type": "image", "image": str(image_path)})
+        for image_path in normalize_image_paths(img_path):
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Input image does not exist: {image_path}")
+            user_content.append({"type": "image", "image": str(image_path)})
     user_content.append({"type": "text", "text": prompt})
     messages = [
         {"role": "system", "content": [{"type": "text", "text": prompt_system}]},

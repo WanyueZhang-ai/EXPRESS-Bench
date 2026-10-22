@@ -174,3 +174,54 @@ resolved config.
 - `max_steps`: optional episode step cap; `0` uses the benchmark-derived budget.
 - `checkpoint`, `device`, `dtype`, `temperature`, `max_length`, and
   `attn_implementation`: local model runtime settings.
+
+## Evidence-aware active-perception path
+
+The new fair RGB-history runner does not execute Fine-EQA perception. It uses
+RGB-D only for geometry, stores a bounded current/key-frame history, and sends
+at most one Intern-Decision request per simulator decision. Forced budget or no-progress stops make zero requests. The request contains one
+`verifier` field plus `value_<candidate>` and `cost_<candidate>` fields for all
+current candidates. Candidate selection is local, so the model never returns a
+cross-mode target ID.
+
+```bash
+# Offline contract smoke test
+python -m InternDecision_scripts.run_evidence_aware --smoke
+
+# Print the resolved fair configuration
+python -m InternDecision_scripts.run_evidence_aware \
+  --cfg-file InternDecision_scripts/config_evidence_aware.yaml --dry-run
+
+# One-question Habitat run
+printf '[0]\n' > /tmp/express_one.json
+LD_LIBRARY_PATH=/ssd/wyzhang/miniconda3/envs/express-intern/lib \
+python -m InternDecision_scripts.run_evidence_aware \
+  --cfg-file InternDecision_scripts/config_evidence_aware.yaml \
+  --indices-file /tmp/express_one.json
+```
+
+The active path forces `semantic_sensor: false`, disables Jev and the legacy
+Intern router, and never calls Fine-EQA `VLM.get_loss`, semantic-region
+integration, `find_next_pose`, or `find_next_point_region`. Geometry frontiers
+are checked with Habitat PathFinder and executed through a bounded waypoint
+using the same `agent.set_state` pose-placement convention as the original
+planner. Route distance and applied pose displacement are logged separately;
+no physical collision test is claimed.
+The default `goe_provider: observed_viewpoints` proposes seen-space
+re-observation locations; the shared model rates them against the question.
+Set `goe_provider: none` for FBE-only ablation. When no frontier exists, a
+same-pose scan candidate is used and the evidence
+no-progress patience rule prevents indefinite repetition.
+
+The current Intern-Decision checkpoint supports a maximum of 16 structured
+fields. With one verifier and two fields per candidate, the default maximum is
+seven candidates per forward. Traces include `decision_fields`, `model_calls`,
+latency, token usage, candidate scores, pose-placement status, and evidence
+novelty. They do not contain gold answers or goal metadata.
+
+A fixed-index comparison can use the same runner with a JSON array of 100
+question indices in `--indices-file` and a separate `--output-dir`. After the
+run, evaluate `results.pkl` with `evaluation.score` in the express-intern
+environment. A one-question smoke run verifies wiring only; it cannot establish
+an exploration or accuracy gain. EAC model failures are stored as `EAC: "0,0"`
+with `eac_status` to keep result aggregation readable.

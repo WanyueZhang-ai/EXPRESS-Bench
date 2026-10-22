@@ -1,0 +1,46 @@
+seed: 42
+dataset_path: ./data/express-bench.json
+scene_data_path: ./data
+output_dir: ./experiment_result_evidence_aware
+rgb_sensor: true
+depth_sensor: true
+semantic_sensor: false
+save_obs: true
+save_freq: 5
+camera_height: 1.5
+camera_tilt_deg: 0
+img_width: 512
+img_height: 512
+hfov: 90
+tsdf_grid_size: 0.1
+margin_w_ratio: 0.25
+margin_h_ratio: 0.6
+init_clearance: 0.5
+max_step_room_size_ratio: 3
+black_pixel_ratio: 0.5
+jev:
+  enabled: false
+intern_decision:
+  enabled: false
+active_perception:
+  enabled: true
+  checkpoint: /ssd/wyzhang/all_models/Intern-Decision-4B
+  device: cuda:0
+  dtype: bfloat16
+  temperature: 1.99241824
+  max_length: 8192
+  attn_implementation: sdpa
+  max_candidates: 7
+  max_fbe_candidates: 4
+  max_goe_candidates: 3
+  goe_provider: observed_viewpoints
+  max_steps: 0
+  max_move_m: 3.0
+  history_window: 8
+  max_history_images: 2
+  progress_threshold: 0.01
+  stop_threshold: 0.75
+  utility_threshold: 0.05
+  no_progress_patience: 3
+  cost_weight: 0.5
+  novelty_weight: 0.1

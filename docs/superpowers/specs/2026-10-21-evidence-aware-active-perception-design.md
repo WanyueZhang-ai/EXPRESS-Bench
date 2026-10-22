@@ -9,8 +9,9 @@ region integration, or Fine-EQA stop decision. It retains RGB-D geometry,
 Habitat reachability/navigation execution, the existing result contract, and a
 separate answering VLM.
 
-The decision model must use one forward pass per simulator decision. One request
-contains a Verifier field plus Value and Cost fields for every executable
+The decision model uses at most one forward pass per simulator decision.
+Forced stops for budget, absent candidates, or no progress skip inference and
+record zero model calls. An inference request contains a Verifier field plus Value and Cost fields for every executable
 candidate. The local policy chooses STOP or the best valid candidate from those
 scores; the model never emits a free-form mode/target pair.
 
@@ -20,9 +21,10 @@ scores; the model never emits a free-form mode/target pair.
 
 - A safe state encoder for current RGB, bounded key-frame history, action/path
   history, novelty, collision, and geometry statistics.
-- Geometry-only FBE candidates and a pluggable question-conditioned GOE cue
-  provider. GOE is empty when no fair cue provider is configured; the runtime
-  never fabricates semantic region labels.
+- Geometry-only FBE candidates and a configured, fair GOE proposal source.
+  The default `observed_viewpoints` source proposes revisits to observed free
+  space; `none` disables GOE. The shared backbone rates each proposal against
+  the question and RGB history. The runtime never fabricates semantic labels.
 - A structured Intern-Decision backend that asks all decision fields in one
   request and maps discrete score bins to Verifier, Value, and Cost values.
 - A deterministic policy combining the three scores, novelty, progress, and
@@ -85,13 +87,15 @@ indices.
 `GeometryCandidateGenerator` extracts reachable frontier proposals from TSDF
 occupancy/exploration volumes and Habitat path checks. FBE features include
 stable ID, relative direction, distance bin, frontier/new-voxel estimates, and
-feasibility. It does not use semantic values produced by Fine-EQA.
+feasibility. It does not use semantic values produced by Fine-EQA. The
+checkpoint supports at most 16 decision fields, so a single-forward request
+contains at most seven candidates (one Verifier and two fields per candidate).
 
-GOE is provided through `GoalCueProvider`. A provider may use the fair RGB and
-history state to produce question-conditioned reachable proposals. Until one
-is configured, the GOE list is empty and the policy can safely explore FBE
-candidates. This is preferable to reusing Fine-EQA semantic regions or
-claiming a privileged cue.
+GOE uses the explicitly configured `goe_provider`. The default
+`observed_viewpoints` provider proposes navigable re-observation locations
+from seen free space without claiming semantic goal knowledge. The backbone
+uses the question and RGB evidence to rate their expected value. Setting the
+provider to `none` yields an FBE-only ablation.
 
 ### One-forward decision backbone
 
@@ -123,15 +127,22 @@ U_i = value_i - cost_weight * cost_i + novelty_weight * novelty_i
 The policy stops when Verifier probability crosses the configured threshold,
 the best utility is below the exploration threshold, no candidate is feasible,
 the no-progress patience limit is reached, or the episode budget is exhausted.
-Otherwise it executes the highest-utility candidate with deterministic lexical
+Otherwise it executes the highest-utility candidate with deterministic ascending lexical
 tie breaking. Every forced stop, fallback, and no-progress decision has an
 explicit reason.
 
 ### Navigation and answering
 
 The active-perception branch calls `TSDFPlanner.integrate` only for RGB-D
-geometry and delegates selected reachable targets to the existing Habitat
-controller. It does not instantiate or call the Fine-EQA Prismatic VLM. On
+geometry and executes the selected candidate point with a geometry-only PathFinder route
+and bounded waypoint. Following the existing EXPRESS-Bench planner convention,
+the active runner places the agent at that navigable waypoint using
+`agent.set_state`; this is a simulator pose placement, not a collision-checked
+physical action sequence. It records the applied pose displacement, route
+length, and explicit `unreachable` failures. It never
+calls `find_next_pose` or `find_next_point_region`, because both contain
+Fine-EQA semantic target selection. It does not instantiate or call the
+Fine-EQA Prismatic VLM. On
 STOP or forced termination, the answer backend receives the selected current
 frame plus bounded key frames. Qwen remains the default answering and EAC
 backend; result pickle fields remain compatible with `evaluation.py`.
@@ -147,25 +158,26 @@ backend; result pickle fields remain compatible with `evaluation.py`.
 - `InternDecision_scripts/evidence_backbone.py`: one-forward structured
   Verifier/Value/Cost adapter.
 - `InternDecision_scripts/evidence_policy.py`: stop/explore utility policy.
+- `InternDecision_scripts/geometry_navigation.py`: geometry-only bounded
+  waypoint selection and target failure accounting.
 - `InternDecision_scripts/active_perception_hook.py`: online composition of the
-  encoder, candidate generator, backbone, and policy.
+  encoder, backbone, and policy.
+- `InternDecision_scripts/active_episode.py`: independent Habitat episode loop,
+  geometry proposals, PathFinder waypoint placement, answer and EAC output.
 - `InternDecision_scripts/run_evidence_aware.py`: CLI runner.
 - `InternDecision_scripts/config_evidence_aware.yaml`: fair RGB-history config.
 - Focused unit/integration tests for each new component.
 
 ### Modified files
 
-- `main.py`: add an opt-in active-perception branch and keep the legacy branch
-  unchanged; move expensive Fine-EQA perception behind the legacy path.
-- `src/tsdf.py`: expose geometry frontier proposals without consuming the
-  existing semantic-region state.
 - `gpt.py`: accept a bounded list of image paths for answering while retaining
   single-image compatibility.
-- `InternDecision_scripts/answer_backend.py`: forward selected key frames and
-  record evidence metadata.
-- `InternDecision_scripts/runtime_utils.py`: clean output/config helpers if
-  needed by the new runner.
-- `InternDecision_scripts/README.md`: document the new command and guarantees.
+- `InternDecision_scripts/README.md`: document the new command, provider
+  switch, and navigation measurement semantics.
+
+The new runner is independent of `main.py`, so the legacy experiment entry
+points and their results remain unchanged. It reads TSDF geometry through the
+existing planner instance and does not call semantic region methods.
 
 ## Fairness and error handling
 
@@ -175,8 +187,8 @@ backend; result pickle fields remain compatible with `evaluation.py`.
 - Missing images, malformed model responses, stale candidate IDs, low
   confidence, or inference errors produce explicit fallbacks; they never
   silently switch to Fine-EQA.
-- One model call corresponds to one simulator decision. History capture adds
-  no simulator transition.
+- Each scored decision makes one model call. Forced stops make zero calls.
+  History capture adds no simulator transition.
 - Candidate count, decision field count, input tokens, inference latency,
   fallback reason, stop reason, and actual transition results are logged in a
   secret-free JSONL trace.
@@ -186,9 +198,9 @@ backend; result pickle fields remain compatible with `evaluation.py`.
 1. Run pure unit tests with fake engines and no Habitat/model weights.
 2. Run the full available unittest suite in the `express-intern` environment.
 3. Run one fixed-index Habitat episode with the active config.
-4. Inspect the trace for one-forward calls, no forbidden state fields,
-   `invalid_target == 0`, and accurate candidate-to-executor mapping.
-5. Run a fixed 100-question comparison and report C, C*, E_path, d_T, actual
+4. Inspect the trace for at most one call per decision, no forbidden state fields,
+   no `invalid_target` fallback field, and accurate candidate-to-executor mapping.
+5. In a later fixed 100-question comparison, report C, C*, E_path, d_T, actual
    path, stop rate, no-progress tail, collision rate, fallback rate, and
    evidence gain. Keep the old Fine-EQA results as a comparison only; they are
    not used to execute the new branch.
@@ -198,8 +210,8 @@ backend; result pickle fields remain compatible with `evaluation.py`.
 - The current checkpoint's structured score calibration may be weak. The trace
   records raw bins/probabilities so thresholds can be calibrated before any
   learned-head training.
-- GOE quality depends on a fair `GoalCueProvider`. The first implementation
-  must expose an honest FBE-only fallback rather than reintroduce Fine-EQA
-  semantics.
+- GOE quality depends on question relevance inferred by the shared backbone
+  for geometry-only revisit proposals. The `none` switch exposes FBE-only
+  ablation without Fine-EQA semantics.
 - Multi-frame answering increases image-token cost. `max_history_images` and
   deterministic key-frame selection keep this bounded and measurable.
