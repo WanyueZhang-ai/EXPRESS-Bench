@@ -67,3 +67,17 @@ class ForcedStopTests(unittest.TestCase):
             self.assertEqual(result.decision.reason, "no_progress")
             self.assertEqual(result.trace["model_calls"], 0)
             self.assertEqual(len(engine.calls), 0)
+
+class CalibrationTraceTests(unittest.TestCase):
+    def test_trace_keeps_safe_raw_probabilities(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image = Path(temp) / "frame.png"
+            Image.new("RGB", (8, 8), "red").save(image)
+            controller = ActivePerceptionController("What is visible?", "object", engine=FakeEngine(), max_steps=3)
+            result = controller.step(
+                step=0, image_path=image, pose=(0, 0, 0),
+                candidates=[{"id": "fbe_0", "mode": "fbe"}],
+                newly_explored_fraction=0.2,
+            )
+            self.assertIn("verifier", result.trace["raw_probabilities"])
+            self.assertIn("value_fbe_0", result.trace["raw_probabilities"])

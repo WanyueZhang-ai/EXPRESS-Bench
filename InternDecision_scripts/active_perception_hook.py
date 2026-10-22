@@ -100,6 +100,7 @@ class ActivePerceptionController:
             "model_calls": scores.model_calls if scores else int(attempted_score and self.backbone.last_predict_called),
             "latency_ms": scores.latency_ms if scores else None,
             "usage": scores.usage if scores else {},
+            "raw_probabilities": scores.raw_probabilities if scores else {},
             "candidate_scores": {
                 identifier: {"value": scores.value[identifier], "cost": scores.cost[identifier]}
                 for identifier in scores.value

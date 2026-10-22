@@ -41,13 +41,13 @@ def prepare_candidate_snapshot(
 ):
     if goe_provider not in {"observed_viewpoints", "none"}:
         raise ValueError("goe_provider must be observed_viewpoints or none")
-    fbe = geometry_frontiers(
-        free, observed, current_xy=current_xy, origin_xy=origin_xy,
-        voxel_size=voxel_size, floor_height=floor_height,
-        max_candidates=max_fbe,
-    )
-    if max_fbe <= 0:
-        fbe = []
+    fbe = []
+    if max_fbe > 0:
+        fbe = geometry_frontiers(
+            free, observed, current_xy=current_xy, origin_xy=origin_xy,
+            voxel_size=voxel_size, floor_height=floor_height,
+            max_candidates=max_fbe,
+        )
     goe = []
     if goe_provider == "observed_viewpoints" and max_goe > 0:
         goe = observed_viewpoints(

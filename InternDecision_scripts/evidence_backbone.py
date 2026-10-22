@@ -121,6 +121,12 @@ class EvidenceAwareDecisionBackbone:
         value: dict[str, float] = {}
         cost: dict[str, float] = {}
         raw: dict[str, dict[str, float]] = {}
+        verifier_probabilities = verifier_answer.get("probabilities", {})
+        if isinstance(verifier_probabilities, Mapping):
+            raw["verifier"] = {
+                str(key): _probability(number, f"verifier.{key}")
+                for key, number in verifier_probabilities.items()
+            }
         for identifier in ids:
             for kind, destination in (("value", value), ("cost", cost)):
                 field = f"{kind}_{identifier}"

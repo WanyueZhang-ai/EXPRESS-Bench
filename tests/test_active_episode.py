@@ -73,3 +73,16 @@ class ActiveEpisodeContractTests(unittest.TestCase):
         class FakePath:
             points = []
         self.assertIsNone(route_points(FakePath()))
+
+class CandidateBudgetTests(unittest.TestCase):
+    def test_zero_fbe_budget_keeps_only_observed_viewpoints(self):
+        free = np.ones((7, 7), dtype=bool)
+        observed = np.ones((7, 7), dtype=bool)
+        rows, _ = prepare_candidate_snapshot(
+            free=free, observed=observed, current_xy=(3.0, 3.0),
+            origin_xy=(0.0, 0.0), voxel_size=1.0, floor_height=0.0,
+            path_checker=lambda point: True, max_candidates=3,
+            max_fbe=0, max_goe=3,
+        )
+        self.assertTrue(rows)
+        self.assertTrue(all(row["mode"] == "goe" for row in rows))

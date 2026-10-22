@@ -66,3 +66,12 @@ class ScoreQuestionSemanticsTests(unittest.TestCase):
         self.assertIn("evidence", value_text)
         self.assertIn("travel", cost_text)
         self.assertNotEqual(value_text, cost_text)
+
+class RawCalibrationTests(unittest.TestCase):
+    def test_traceable_probabilities_include_verifier_and_score_fields(self):
+        result = EvidenceAwareDecisionBackbone(FakeEngine()).score({
+            "images": [], "candidates": [{"id": "fbe_0", "mode": "fbe"}],
+        })
+        self.assertEqual(result.raw_probabilities["verifier"]["yes"], 0.2)
+        self.assertIn("value_fbe_0", result.raw_probabilities)
+        self.assertIn("cost_fbe_0", result.raw_probabilities)
