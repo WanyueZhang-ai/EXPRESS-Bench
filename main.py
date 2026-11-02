@@ -148,7 +148,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
     if intern_enabled:
         def _qwen_answer(question_text, question_type_text, answer_state):
             image_paths = answer_state.get("images", []) if isinstance(answer_state, dict) else []
-            image_for_answer = image_paths[0] if image_paths else None
+            image_for_answer = image_paths if image_paths else None
             text = _qwen_call(answer_prompt, f"Q: {question_text}\nA: ", image_for_answer)
             return text.replace("A:", "").strip()
         intern_runtime = runtime_from_config(intern_cfg, qwen_fn=_qwen_answer)
@@ -177,6 +177,8 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
         )
 
         result = {"question_ind": question_ind, "jev_decisions": [], "intern_decisions": []}
+        if intern_runtime is not None:
+            intern_runtime.reset_episode(str(question_ind))
         question_data = questions_data[question_ind]
         question = question_data["question"]
         answer = question_data["answer"]
@@ -557,7 +559,7 @@ def main(cfg, question_indices=None, progress_path=None, append_trace=False):
                     goe_candidates=([] if intern_action_mode == "direct_actions" else goe_candidates),
                     fbe_candidates=([] if intern_action_mode == "direct_actions" else fbe_candidates),
                     max_candidates=max_candidates,
-                    image_path=img_path if intern_evidence_mode == "decision_image" else None,
+                    image_path=img_path if (intern_evidence_mode == "decision_image" or intern_runtime.memory is not None) else None,
                     objects=object_rows,
                     step=cnt_step,
                     decision_id=f"{question_ind}:{cnt_step}",

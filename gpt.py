@@ -86,10 +86,12 @@ def qwen3_vl(
     prompt_system, prompt = prompt_make(prompt_path, ex_prompt)
     user_content = []
     if img_path is not None:
-        image_path = Path(img_path).expanduser()
-        if not image_path.is_file():
-            raise FileNotFoundError(f"Input image does not exist: {image_path}")
-        user_content.append({"type": "image", "image": str(image_path)})
+        image_paths = img_path if isinstance(img_path, (list, tuple)) else [img_path]
+        for value in image_paths:
+            image_path = Path(value).expanduser()
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Input image does not exist: {image_path}")
+            user_content.append({"type": "image", "image": str(image_path)})
     user_content.append({"type": "text", "text": prompt})
     messages = [
         {"role": "system", "content": [{"type": "text", "text": prompt_system}]},

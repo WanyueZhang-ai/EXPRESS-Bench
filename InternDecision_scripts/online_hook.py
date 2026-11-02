@@ -13,6 +13,8 @@ from .decision_router import (
 )
 from .evidence_adapters import build_evidence_state
 from .intern_decision_engine import InternDecisionEngine
+from .harness import EpisodeMemory
+from .joint_policy import JointDecisionRouter
 
 
 def _get(config: Any, key: str, default: Any) -> Any:
@@ -42,6 +44,12 @@ class InternDecisionRuntime:
     router: InternDecisionRouter
     answer_backend: AnswerBackend
 
+    memory: Optional[EpisodeMemory] = None
+
+    def reset_episode(self, episode_id):
+        if self.memory is not None:
+            self.memory.reset(episode_id)
+
     @property
     def evidence_mode(self) -> str:
         return str(self.config.get("evidence_mode", "vlm_state"))
@@ -55,16 +63,25 @@ class InternDecisionRuntime:
         return str(self.config.get("answer_backend", "qwen_vl"))
 
     def evidence(self, **kwargs: Any) -> dict[str, Any]:
-        return build_evidence_state(mode=self.evidence_mode, **kwargs)
+        state = build_evidence_state(mode=self.evidence_mode, **kwargs)
+        if self.memory is not None:
+            state = self.memory.update(state, image_path=kwargs.get("image_path"))
+        return state
 
     def decide(self, state: Mapping[str, Any], *, baseline_action: str, baseline_target_id: Optional[str]) -> RouterDecision:
-        return self.router.decide(
+        decision = self.router.decide(
             state,
             baseline_action=baseline_action,
             baseline_target_id=baseline_target_id,
         )
 
+        if self.memory is not None:
+            self.memory.record(decision)
+        return decision
+
     def answer(self, question: str, question_type: str, state: Mapping[str, Any]) -> AnswerResult:
+        if self.memory is not None:
+            state = self.memory.answer_state(state)
         return self.answer_backend.answer(question, question_type, state)
 
     def trace(
@@ -75,7 +92,7 @@ class InternDecisionRuntime:
         step: int,
         seed: Any,
     ) -> dict[str, Any]:
-        return decision_to_trace(
+        trace = decision_to_trace(
             decision,
             question_index=question_index,
             step=step,
@@ -84,6 +101,11 @@ class InternDecisionRuntime:
             answer_backend=self.answer_mode,
             seed=seed,
         )
+        if self.memory is not None:
+            trace["state_version"] = self.memory.version
+            trace["shared_state"] = decision.state
+            trace["joint_response"] = decision.response
+        return trace
 
 
 def runtime_from_config(
@@ -104,6 +126,10 @@ def runtime_from_config(
         raise ValueError("direct_actions requires decision_image or decision_objects evidence")
     direct_actions = tuple(raw.get("direct_action_whitelist", DEFAULT_DIRECT_ACTIONS))
     safe_action = str(raw.get("safe_direct_action", "turn_right"))
+    harness = _mapping(raw.get("harness", {}))
+    harness_enabled = bool(harness.get("enabled", False))
+    if harness_enabled and raw.get("answer_backend", "qwen_vl") != "qwen_vl":
+        raise ValueError("harness requires the final VLM answer backend")
     engine = InternDecisionEngine(
         checkpoint=str(raw.get("checkpoint", "/ssd/wyzhang/all_models/Intern-Decision-4B")),
         device=str(raw.get("device", "cuda")),
@@ -114,7 +140,8 @@ def runtime_from_config(
         attn_implementation=str(raw.get("attn_implementation", "sdpa")),
         inference_module=raw.get("inference_module"),
     )
-    router = InternDecisionRouter(
+    router_cls = JointDecisionRouter if harness_enabled else InternDecisionRouter
+    router = router_cls(
         engine,
         stop_threshold=float(raw.get("stop_threshold", 0.75)),
         min_choice_confidence=float(raw.get("min_choice_confidence", 0.0)),
@@ -129,4 +156,9 @@ def runtime_from_config(
         answer_options=_mapping(raw.get("answer_options", {})),
         qwen_fn=qwen_fn,
     )
-    return InternDecisionRuntime(raw, engine, router, answer_backend)
+    memory = EpisodeMemory(
+        max_frames=int(harness.get("max_frames", 64)),
+        retrieval_frames=int(harness.get("retrieval_frames", 8)),
+        max_objects=int(harness.get("max_objects", 128)),
+    ) if harness_enabled else None
+    return InternDecisionRuntime(raw, engine, router, answer_backend, memory)
