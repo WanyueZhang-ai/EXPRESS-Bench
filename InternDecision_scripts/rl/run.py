@@ -26,27 +26,20 @@ def main():
     from .policy import TrainableDecisionPolicy, PrivilegedCritic
     from .trainer import PPOTrainer
     from .environment import HabitatTrainingEnvironment, ACTIONS
-    from gpt import qwen3_vl
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=False)
-    tasks = json.loads(Path(args.tasks).read_text())
-    if not isinstance(tasks, list) or not tasks:
-        raise ValueError("tasks must be a nonempty JSON list")
-    held_out = json.loads(Path(args.holdout_tasks).read_text())
-    held_out_scenes = {task["scene_id"] for task in held_out}
-    overlap = {task["scene_id"] for task in tasks} & held_out_scenes
-    if overlap:
-        raise ValueError(f"Training and held-out scenes overlap: {sorted(overlap)}")
-    for task in tasks:
-        if task.get("split") != "train":
-            raise ValueError("Every task must explicitly declare split=train after scene split verification")
-        if "evidence_sets" in task and (not task["evidence_sets"] or not all(task["evidence_sets"])):
-            raise ValueError("evidence_sets must contain nonempty alternatives")
+    from .tasks import load_tasks, check_scenes
+    tasks = load_tasks(args.tasks, training=True)
+    held_out = load_tasks(args.holdout_tasks, training=False)
+    check_scenes(tasks, held_out)
+    if args.phase == "collect" and any(task.get("task_type") == "vln" for task in tasks):
+        raise ValueError("VLN collect needs an aligned expert teacher; use prepared action-only seed JSONL for sft, or ppo with an initialized policy")
     (output / "run.json").write_text(json.dumps(vars(args), indent=2))
 
     def answer_reward(task, state):
+        from gpt import qwen3_vl
         response = qwen3_vl("prompt/answer.txt", f"Q: {task['question']}\nA: ",
                             state.get("images"), device=args.answer_device)
         # Deterministic exact-match starter reward. Open-ended training requires a
@@ -89,7 +82,8 @@ def main():
                 rows = trainer.collect(env)
                 loss = trainer.update(rows)
                 metrics = {"update": update, "loss": loss, "transitions": len(rows),
-                           "reward": sum(row["reward"] for row in rows)}
+                           "reward": sum(row["reward"] for row in rows),
+                           **env.episode_metrics}
             with (output / "metrics.jsonl").open("a") as stream:
                 stream.write(json.dumps(metrics) + "\n")
             print(metrics, flush=True)

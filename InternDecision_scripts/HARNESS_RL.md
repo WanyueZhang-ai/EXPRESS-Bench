@@ -97,3 +97,71 @@ python -m InternDecision_scripts.run_intern_decision --smoke
 ```
 
 测试覆盖记忆隔离、幂等性、容量、原始帧检索、特权字段拒绝、单次联合请求、最终 VLM 多帧输入、原生 token adapter 梯度、PPO 参数更新、GAE 和反事实恢复。小型模型测试用于验证计算逻辑，真实 Intern-Decision / Habitat / HM3D 的集成运行需要在具备模型与数据的机器上完成。
+
+## SimpleVLN 最小导航接入
+
+新增 `task_type: "vln"`，复用单原子动作 PPO/GAE、RGB 历史和六维特权 critic。
+这不是 SimpleVLN 的 action-chunk / DAPO 复现。纯导航不会导入或调用回答 Qwen-VL。
+默认原有 EQA 数据和奖励保持兼容；不同任务可混合，但建议先分别验证。
+
+训练任务 JSON 示例（位置使用 Habitat 坐标，旋转为单位四元数 **xyzw**）：
+
+```json
+[{
+  "task_type": "vln",
+  "split": "train",
+  "episode_id": "example",
+  "scene_id": "SCAN_ID",
+  "scene_path": "mp3d/SCAN_ID/SCAN_ID.glb",
+  "instruction": "Walk into the kitchen and stop next to the table.",
+  "start_position": [0, 0, 0],
+  "start_rotation": [0, 0, 0, 1],
+  "goals": [{"position": [1, 0, 1]}],
+  "success_distance": 3.0
+}]
+```
+
+示例坐标仅说明格式，不可作为实际可达任务。`scene_path` 是相对 `--scene-root`
+的资产路径，也支持绝对路径。省略时可解析原有 HM3D 目录及 MP3D 目录；歧义时报错。
+必须准备可加载 navmesh；起点到目标不可达时报错。多个目标使用最小可达 geodesic distance。
+动作固定前进 0.25m、转向 15°。RGB 保留本分支的 512×512、90° HFOV、1.5m 高度，
+并未声称与 SimpleVLN 官方相机设置一致。正式比较前须对齐相机、预算及历史采样。
+
+导航模式只请求 action 字段，不训练 EQA 充分性/收益/成本标签。目标和路径不会传入 actor。
+奖励是显式 stop 且 geodesic distance 严格小于阈值时为 1，其余为 0；到达但超时不给成功。
+不加入移动惩罚或距离塑形。metrics.jsonl 增加 success、spl、goal_distance、path_length、
+steps、stop_called、budget_exhausted；其中 steps 为实际移动/转向次数，不含 stop。
+
+### 数据转换
+
+官方 parquet 实际 schema 尚未在本接入中验证，因此不提供猜测字段名的隐式适配。
+先检查本地 manifest，用 JSON 明确映射标准字段到源字段的点分路径。
+`goals` 源值必须为 `[{"position": [x,y,z]}]`；字符串 JSON 或其他布局需先规范化。
+例如源数据已经同名时 mapping.json 为：
+
+```json
+{"scene_id":"scene_id","instruction":"instruction","start_position":"start_position","start_rotation":"start_rotation","goals":"goals"}
+```
+
+```bash
+# parquet 输入额外需要 pyarrow；JSON 输入无需额外依赖。
+python -m InternDecision_scripts.rl.tasks \
+  --input /path/to/vln_train.parquet --mapping mapping.json \
+  --holdout-tasks heldout_questions.json --output train_vln.json
+
+python -m InternDecision_scripts.rl.run --phase ppo \
+  --checkpoint /path/to/initialized-Intern-Decision \
+  --tasks train_vln.json --holdout-tasks heldout_questions.json \
+  --scene-root /path/to/scene_datasets --output ./runs/vln-ppo \
+  --max-steps 64 --updates 10 --device cuda:0
+```
+
+转换会明确设置 split=train，因此输入必须已由使用者确认为训练 manifest。
+转换器和训练入口都会检查 held-out 场景交集，规范化 HM3D 数字前缀与资产文件后缀；
+未覆盖的自定义别名仍需人工核对。不会覆盖已有输出。
+
+VLN 的 collect 暂不支持：原有一步可见性教师不适用于导航，入口会明确拒绝。
+SFT 可使用已对齐 RGB/动作的 action-only seed JSONL，格式沿用原 seed 数据。
+不要将 action chunk 的多个动作都配到同一张起始图，也不要直接加载 SimpleVLN Qwen
+checkpoint 作为 Intern-Decision（其 native encode/decision-token 接口未必兼容）。
+本阶段仅验证了模拟环境单测和原有回归测试，尚未完成真实 Habitat/模型及官方 parquet 集成运行。

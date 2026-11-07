@@ -15,7 +15,7 @@ ACTIONS = ("move_forward", "turn_left", "turn_right", "stop")
 
 
 class HabitatTrainingEnvironment:
-    def __init__(self, tasks, scene_root, output_dir, answer_reward, max_steps=64, seed=42):
+    def __init__(self, tasks, scene_root, output_dir, answer_reward=None, max_steps=64, seed=42):
         if not tasks or max_steps < 1:
             raise ValueError("nonempty tasks and positive max_steps required")
         self.tasks, self.scene_root = tasks, Path(scene_root)
@@ -41,16 +41,26 @@ class HabitatTrainingEnvironment:
         self.task = self.tasks[self.index]
         self.episode += 1
         scene_id = self.task["scene_id"]
-        scene = self.scene_root / scene_id / (scene_id.split("-")[1] + ".basis.glb")
+        self.is_vln = self.task.get("task_type") == "vln"
+        from .tasks import resolve_scene
+        scene = resolve_scene(self.scene_root, self.task)
         if not scene.is_file():
             raise FileNotFoundError(scene)
         settings = dict(scene=str(scene), height=512, width=512, sensor_height=1.5,
-                        hfov=90, semantic_sensor=bool(self.task.get("evidence_sets")))
-        self.sim = habitat_sim.Simulator(make_simple_cfg(settings))
+                        hfov=90, semantic_sensor=not self.is_vln and bool(self.task.get("evidence_sets")))
+        config = make_simple_cfg(settings)
+        if self.is_vln:
+            config.agents[0].action_space = {
+                name: habitat_sim.agent.ActionSpec(name, habitat_sim.agent.ActuationSpec(amount=amount))
+                for name, amount in (("move_forward", 0.25), ("turn_left", 15), ("turn_right", 15))
+            }
+        self.sim = habitat_sim.Simulator(config)
         self.sim.seed(self.seed + self.episode)
         navmesh = scene.with_suffix(".navmesh")
         if navmesh.is_file():
             self.sim.pathfinder.load_nav_mesh(str(navmesh))
+        if self.is_vln and not self.sim.pathfinder.is_loaded:
+            raise ValueError("VLN requires a loaded navmesh")
         self.agent = self.sim.initialize_agent(0)
         pose = self.agent.get_state()
         pose.position = np.asarray(self.task["start_position"], dtype=float)
@@ -58,6 +68,11 @@ class HabitatTrainingEnvironment:
         self.agent.set_state(pose)
         self.step_count, self.distance = 0, 0.0
         self.seen = set()
+        self.episode_metrics = {}
+        if self.is_vln:
+            self.initial_goal_distance = self.goal_distance()
+            if not math.isfinite(self.initial_goal_distance):
+                raise ValueError("VLN start cannot reach any goal")
         self.memory.reset(f"train-{self.episode}")
         self.directory = self.output_dir / f"episode-{self.episode:06d}"
         self.directory.mkdir(parents=True, exist_ok=False)
@@ -65,7 +80,7 @@ class HabitatTrainingEnvironment:
         return self.request, self.features()
 
     def coverage(self):
-        sets = self.task.get("evidence_sets", [])
+        sets = [] if self.task.get("task_type") == "vln" else self.task.get("evidence_sets", [])
         if not sets:
             return None
         return max(len(set(map(int, ids)) & self.seen) / len(set(ids)) for ids in sets if ids)
@@ -79,18 +94,42 @@ class HabitatTrainingEnvironment:
             import numpy as np
             self.seen.update(int(value) for value in np.unique(semantic) if int(value) >= 0)
         state = build_evidence_state(
-            mode="decision_image", question=self.task["question"], question_type=self.task["type"],
+            mode="decision_image", question=self.task["instruction"] if self.is_vln else self.task["question"],
+            question_type="navigation" if self.is_vln else self.task["type"],
             history={"step": self.step_count, "max_steps": self.max_steps, "path_length": self.distance},
             perception={}, goe_candidates=[], fbe_candidates=[], image_path=image, step=self.step_count,
         )
         self.state = self.memory.update(state, image)
-        self.request = request_with_questions(self.state, joint_questions(self.state, "direct_actions", ACTIONS))
+        questions = joint_questions(self.state, "direct_actions", ACTIONS)
+        if self.is_vln:
+            questions = {"action": {
+                "type": "choice",
+                "instructions": "Follow the navigation instruction using current and historical RGB views. Stop only when the instructed destination is reached.",
+                "criteria": {"move_forward": "Move forward 0.25 metres", "turn_left": "Turn left 15 degrees",
+                             "turn_right": "Turn right 15 degrees", "stop": "Stop navigation at the instructed destination"},
+            }}
+        self.request = request_with_questions(self.state, questions)
+
+    def goal_distance(self):
+        import habitat_sim
+        import numpy as np
+        distances = []
+        for goal in self.task["goals"]:
+            path = habitat_sim.ShortestPath()
+            path.requested_start = self.agent.get_state().position
+            path.requested_end = np.asarray(goal["position"], dtype=float)
+            if self.sim.pathfinder.find_path(path) and math.isfinite(path.geodesic_distance):
+                distances.append(path.geodesic_distance)
+        return min(distances, default=float("inf"))
 
     def features(self):
         import habitat_sim
         import numpy as np
         distance, reachable = 0.0, 0.0
-        if "goal_position" in self.task:
+        if self.task.get("task_type") == "vln":
+            raw_distance = self.goal_distance()
+            distance, reachable = (min(raw_distance / 20, 1.0), 1.0) if math.isfinite(raw_distance) else (1.0, 0.0)
+        elif "goal_position" in self.task:
             path = habitat_sim.ShortestPath()
             path.requested_start = self.agent.get_state().position
             path.requested_end = np.asarray(self.task["goal_position"], dtype=float)
@@ -125,6 +164,20 @@ class HabitatTrainingEnvironment:
             if coverage is not None:
                 reward += 0.1 * (coverage - previous_coverage)
         budget_end = self.step_count >= self.max_steps
+        if self.is_vln:
+            done = terminated or budget_end
+            reward = 0.0
+            if done:
+                distance = self.goal_distance()
+                success = terminated and math.isfinite(distance) and distance < self.task.get("success_distance", 3.0)
+                reward = float(success)
+                shortest = self.initial_goal_distance
+                self.episode_metrics = {"task_type": "vln", "success": bool(success),
+                    "spl": float(success) * (shortest / max(shortest, self.distance) if max(shortest, self.distance) > 0 else 1.0),
+                    "goal_distance": distance if math.isfinite(distance) else None,
+                    "path_length": self.distance, "steps": self.step_count,
+                    "stop_called": terminated, "budget_exhausted": budget_end}
+            return self.request, self.features(), reward, done, False, {"targets": {}, **self.episode_metrics}
         if terminated or budget_end:
             # Budget exhaustion is a terminal state of this finite-horizon task.
             quality = float(self.answer_reward(self.task, self.memory.answer_state(self.state)))
